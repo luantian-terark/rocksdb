@@ -1,0 +1,14 @@
+{
+	"RowSchema": {
+		"columns" : {
+			"key"   : { "type" : "strzero" },
+			"value" : { "type" : "strzero" }
+		}
+	},
+	"CompressingWorkMemSize" : "10K",
+  "MaxWritingSegmentSize": "20K",
+  "//TableClass" :  "MockDbTable",
+	"TableIndex" : [
+		{ "fields": "key", "ordered" : true, "unique": true }
+	]
+}

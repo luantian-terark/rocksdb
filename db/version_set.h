@@ -27,6 +27,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <third-party/terichdb/src/terark/terichdb/json.hpp>
 
 #include "db/column_family.h"
 #include "db/compaction.h"
@@ -761,6 +762,9 @@ class VersionSet {
 
   static uint64_t GetTotalSstFilesSize(Version* dummy_versions);
 
+  static Status TransToJsonFromManifest(const std::string& dbname, Env* env);
+  static Status TransToManifestFromJson(const std::string& dbname, Env* env, VersionSet* version_set);
+  static terark::json VersionEditToJson(VersionEdit& edit);
  private:
   struct ManifestWriter;
 

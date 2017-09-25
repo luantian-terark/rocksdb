@@ -22,6 +22,8 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <fstream>
+#include <iostream>
 #include "db/compaction.h"
 #include "db/filename.h"
 #include "db/internal_stats.h"
@@ -50,6 +52,7 @@
 #include "util/perf_context_imp.h"
 #include "util/stop_watch.h"
 #include "util/sync_point.h"
+#include "terark/terichdb/json.hpp"
 
 namespace rocksdb {
 
@@ -3648,4 +3651,324 @@ uint64_t VersionSet::GetTotalSstFilesSize(Version* dummy_versions) {
   return total_files_size;
 }
 
+terark::json VersionSet::VersionEditToJson(VersionEdit& edit) {
+  terark::json j;
+  if (edit.has_comparator_) j["kComparator"] = edit.comparator_;
+  if (edit.has_log_number_) j["kLogNumber"] = edit.log_number_;
+  if (edit.has_prev_log_number_) j["kPrevFileNumber"] = edit.prev_log_number_;
+  if (edit.has_next_file_number_) j["kNextFileNumber"] = edit.next_file_number_;
+  if (edit.has_last_sequence_) j["kLastSequence"] = edit.last_sequence_;
+  if (edit.has_max_column_family_) j["kMaxColumnFamily"] = edit.max_column_family_;
+  if (edit.is_column_family_drop_) j["kColumnFamilyDrop"] = edit.column_family_name_;
+  if (edit.is_column_family_add_) j["kColumnFamilyAdd"] = edit.column_family_name_;
+  j["kColumnFamily"] = edit.column_family_;
+
+  terark::json delete_files = terark::json::array();
+  VersionEdit::DeletedFileSet dfs = edit.deleted_files_;
+  if (dfs.size() > 0) {
+    for (auto& df: dfs) {
+      terark::json tmp;
+      tmp["level"] = df.first;
+      tmp["file_number"] = df.second;
+      delete_files.push_back(tmp);
+    }
+  }
+  j["kDeletedFile"] = delete_files;
+
+  terark::json add_files = terark::json::array();
+  std::vector<std::pair<int, FileMetaData>> afs = edit.new_files_;
+  if (afs.size() > 0) {
+    for (auto& af: afs) {
+      terark::json tmp;
+      tmp["level"] = af.first;
+      const FileMetaData& f = af.second;
+      tmp["file_number"] = f.fd.GetNumber();
+      tmp["file_size"] = f.fd.GetFileSize();
+      tmp["path_id"] = f.fd.GetPathId();
+      InternalKey smallest_key = f.smallest, largest_key = f.largest;
+      tmp["min_seqno"] = f.smallest_seqno;
+      tmp["max_seqno"] = f.largest_seqno;
+      tmp["min_key_hex"] = smallest_key.DebugString(true);
+      tmp["max_key_hex"] = largest_key.DebugString(true);
+      tmp["kNeedCompaction"] = f.marked_for_compaction;
+      add_files.push_back(tmp);
+    }
+  }
+  j["AddedFiles"] = add_files;
+  return j;
+}
+
+std::string getInternalKey(std::string key) {
+  auto split = [](std::string str, char split_char) {
+    std::string s = "";
+    std::vector<std::string> split_str;
+    split_str.clear();
+    for (decltype(str.length()) i = 0; i < str.length(); ++i) {
+      if (str[i] != split_char) s += str[i];
+
+      if (str[i] == split_char || (i + 1) == str.length()) {
+        split_str.emplace_back(s);
+        s = "";
+      }
+    }
+    return split_str;
+  };
+  auto toDec = [](char num) {
+    if (num >= 'A') return static_cast<int>(num - 'A' + 10);
+    else return static_cast<int>(num - '0');
+  };
+  std::vector<std::string> splited_string = split(key, ' ');
+  assert(splited_string.size() == 4);
+  std::string result = "";
+  int type = 0;
+  SequenceNumber seq = 0;
+  for (decltype(splited_string.size()) i = 0; i < splited_string.size(); ++i) {
+    if (i == 0) {
+      std::string& user_key = splited_string[i];
+      for (decltype(user_key.length()) j = 1; j < user_key.length() - 1; j += 2) {
+        int num = toDec(user_key[j]) << 4 | toDec(user_key[j + 1]);
+        result.push_back(static_cast<char>(num));
+      }
+    } else if (i == 1) {
+      continue;
+    } else if (i == 2) {
+      std::string& sequence = splited_string[i];
+      for (decltype(sequence.length()) j = 0; j < sequence.length() - 1; ++j)
+        seq = seq * 10 + static_cast<int>(sequence[j] - '0');
+      }
+    else if (i == 3) {
+      std::string& _type = splited_string[i];
+      for (decltype(_type.length()) j = 0; j < _type.length(); ++j)
+        type = type * 10 + static_cast<int>(_type[j] - '0');
+    }
+  }
+  seq = seq << 8 | type;
+  int cur = 7;
+  std::string temp(8, '\0');
+  while (seq) {
+    temp[cur--] = static_cast<char>(seq & 0xff);
+    seq >>= 8;
+  }
+  reverse(temp.begin(), temp.end());
+  result += temp;
+  return result;
+}
+
+Status VersionSet::TransToJsonFromManifest(const std::string& dbname, Env* env) {
+  EnvOptions soptions;
+  std::string current;
+  Status s = ReadFileToString(env, CurrentFileName(dbname), &current);
+  if (!s.ok()) return s;
+  if (current.empty() || current[current.size() - 1] != '\n') {
+    return Status::Corruption("CURRENT file does not end with new line");
+  }
+  current.resize(current.size() - 1);
+  std::string dscname = dbname + "/" + current;
+  unique_ptr<SequentialFileReader> file_reader;
+  {
+    unique_ptr<SequentialFile> file;
+    s = env->NewSequentialFile(dscname, &file, soptions);
+    if (!s.ok()) return s;
+    file_reader.reset(new SequentialFileReader(std::move(file)));
+  }
+
+  VersionSet::LogReporter reporter;
+  reporter.status = &s;
+  log::Reader reader(NULL, std::move(file_reader), &reporter, true, 0, 0);
+
+  Slice record;
+  std::string scratch;
+  terark::json version_json = terark::json::array();
+  while (reader.ReadRecord(&record, &scratch) && s.ok()) {
+    VersionEdit edit;
+    s = edit.DecodeFrom(record);
+    if (!s.ok()) break;
+    version_json.push_back(VersionEditToJson(edit));
+  }
+
+  std::string json_path = dscname + std::string(".json");
+  std::ofstream out(json_path, std::ios::out);
+  out << "\xEF\xBB\xBF";
+  out << version_json.dump(2, ' ', true);
+  out.close();
+  return s;
+}
+
+Status VersionSet::TransToManifestFromJson(const std::string& dbname, Env* env, VersionSet* version_set) {
+  EnvOptions soptions;
+  std::string current;
+  Status s = ReadFileToString(env, CurrentFileName(dbname), &current);
+  if (!s.ok()) return s;
+  if (current.empty() || current[current.size() - 1] != '\n') {
+    return Status::Corruption("CURRENT file does not end with new line");
+  }
+  current.resize(current.size() - 1);
+  int current_t;
+  {
+    std::stringstream ss;
+    ss << (current.substr(9));
+    ss >> current_t;
+  }
+  std::string dscname = dbname + "/" + current;
+  std::string json_path = dscname + ".json";
+
+  std::string result = "", json = "", json_tmp = "";
+  std::ifstream in(json_path, std::ios::in);
+
+  in.seekg(3, std::ios::beg);
+  while (std::getline(in, json_tmp))
+    json += json_tmp;
+  terark::json j = terark::json::parse(json);
+
+  unique_ptr<WritableFile> descriptor_file;
+  EnvOptions opt_env_opts = version_set->env_->OptimizeForManifestWrite(version_set->env_options_);
+  s = NewWritableFile(
+          version_set->env_, DescriptorFileName(version_set->dbname_, current_t),
+          &descriptor_file, opt_env_opts);
+  if (s.ok()) {
+    descriptor_file->SetPreallocationBlockSize(version_set->db_options_->manifest_preallocation_size);
+
+    unique_ptr<WritableFileWriter> file_writer(
+            new WritableFileWriter(std::move(descriptor_file), opt_env_opts));
+    version_set->descriptor_log_.reset(new log::Writer(std::move(file_writer), 0, false));
+  }
+
+  for (auto it = j.begin(); it != j.end(); ++it) {
+    VersionEdit edit;
+    terark::json version_edit = it.value();
+    for (auto vit = version_edit.begin(); vit != version_edit.end(); ++vit) {
+      std::string key = vit.key();
+      auto val = vit.value();
+      if (key == "kComparator") {
+        if (val.type() == terark::json::value_t::string)
+          edit.SetComparatorName(val.get<std::string>());
+        else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kLogNumber") {
+        if (val.type() == terark::json::value_t::number_unsigned)
+          edit.SetLogNumber(val.get<uint64_t>());
+        else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kPrevFileNumber") {
+        if (val.type() == terark::json::value_t::number_unsigned)
+          edit.SetPrevLogNumber(val.get<uint64_t>());
+        else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kNextFileNumber") {
+        if (val.type() == terark::json::value_t::number_unsigned)
+          edit.SetNextFile(val.get<uint64_t>());
+        else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kLastSequence") {
+        if (val.type() == terark::json::value_t::number_unsigned)
+          edit.SetLastSequence(val.get<uint64_t>());
+        else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kMaxColumnFamily") {
+        if (val.type() == terark::json::value_t::number_unsigned)
+          edit.SetMaxColumnFamily(val.get<uint32_t>());
+        else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kDeletedFile") {
+        terark::json delete_files = val;
+        if (val.type() != terark::json::value_t::array) {
+          s = Status::Corruption("Wrong type value.");
+          continue;
+        }
+        VersionEdit::DeletedFileSet dfs;
+        int first; uint64_t second;
+        for (decltype(delete_files.size()) i = 0; i < delete_files.size(); ++i) {
+          terark::json tmp = delete_files[i];
+          for (auto df_it = tmp.begin(); df_it != tmp.end(); ++df_it) {
+            if (df_it.key() == "level") first = df_it.value().get<int>();
+            else if (df_it.key() == "file_number") second = df_it.value().get<uint64_t>();
+            else s = Status::Corruption("Json key " + df_it.key() + " do not match any key.");
+          }
+          dfs.insert(std::make_pair(first, second));
+        }
+        edit.deleted_files_ = dfs;
+      } else if (key == "AddedFiles") {
+        terark::json add_files = val;
+        std::vector<std::pair<int, FileMetaData>> afs;
+        for (decltype(add_files.size()) i = 0; i < add_files.size(); ++i) {
+          int first;
+          uint32_t path_id;
+          bool need_compaction;
+          uint64_t number, file_size;
+          InternalKey smallest_key, largest_key;
+          SequenceNumber smallest_seqno, largest_seqno;
+          for (terark::json::iterator af_it = add_files[i].begin(); af_it != add_files[i].end(); ++af_it) {
+            auto aval = af_it.value();
+            std::string akey = af_it.key();
+
+            if (akey == "level") {
+              if (aval.type() == terark::json::value_t::number_unsigned)
+                first = aval.get<int>();
+              else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "file_number") {
+              if (aval.type() == terark::json::value_t::number_unsigned)
+                number = aval.get<uint64_t>();
+              else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "file_size") {
+              if (aval.type() == terark::json::value_t::number_unsigned)
+                file_size = aval.get<uint64_t>();
+              else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "path_id") {
+              if (aval.type() == terark::json::value_t::number_unsigned)
+                path_id = aval.get<uint32_t>();
+              else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "min_key_hex") {
+              if (aval.type() == terark::json::value_t::string) {
+                smallest_key.DecodeFrom(Slice(getInternalKey(aval.get<std::string>())));
+              } else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "max_key_hex") {
+              if (aval.type() == terark::json::value_t::string)
+                largest_key.DecodeFrom(Slice(getInternalKey(aval.get<std::string>())));
+              else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "min_seqno") {
+              if (aval.type() == terark::json::value_t::number_unsigned)
+                smallest_seqno = aval;
+              else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "max_seqno") {
+              if (aval.type() == terark::json::value_t::number_unsigned)
+                largest_seqno = aval;
+              else s = Status::Corruption("Wrong type value.");
+            } else if (akey == "kNeedCompaction") {
+              if (aval.type() == terark::json::value_t::boolean)
+                need_compaction = aval;
+              else s = Status::Corruption("Wrong type value.");
+            } else s = Status::Corruption("Json key " + akey + " do not match any key.");
+          }
+          FileMetaData f;
+          f.largest = largest_key;
+          f.smallest = smallest_key;
+          f.largest_seqno = largest_seqno;
+          f.smallest_seqno = smallest_seqno;
+          f.marked_for_compaction = need_compaction;
+          f.fd.file_size = file_size;
+          f.fd.packed_number_and_path_id = PackFileNumberAndPathId(number, path_id);
+          afs.push_back(std::make_pair(first, f));
+        }
+        edit.new_files_ = afs;
+      } else if (key == "kColumnFamily") {
+          if (val.type() == terark::json::value_t::number_unsigned)
+            edit.SetColumnFamily(val.get<uint32_t>());
+          else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kColumnFamilyAdd") {
+          if (val.type() == terark::json::value_t::string) {
+            edit.column_family_name_ = val.get<std::string>();
+            edit.is_column_family_add_ = true;
+          } else s = Status::Corruption("Wrong type value.");
+      } else if (key == "kColumnFamilyDrop") {
+          if (val.type() == terark::json::value_t::string) {
+            edit.column_family_name_ = val.get<std::string>();
+            edit.is_column_family_drop_ = true;
+          } else s = Status::Corruption("Wrong type value.");
+      } else s = Status::Corruption("Json key " + key + " do not match any key.");
+    }
+    std::string tmp = "";
+    if (edit.EncodeTo(&tmp)) {
+      s = version_set->descriptor_log_->AddRecord(tmp);
+    } else s = Status::Corruption("VersionEdit encode to string failure!");
+    if (!s.ok()) break;
+  }
+
+  if (s.ok()) s = SyncManifest(env, version_set->db_options_, version_set->descriptor_log_->file());
+  in.close();
+  return s;
+}
 }  // namespace rocksdb

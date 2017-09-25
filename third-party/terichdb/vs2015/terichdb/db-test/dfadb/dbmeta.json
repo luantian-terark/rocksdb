@@ -1,0 +1,44 @@
+﻿{
+	"RowSchema": {
+		"columns" : {
+			"id"  : { "type" : "uint64" },
+			"fix" : { "type" : "fixed", "length" : 19 },
+			"fix2": {
+				"type": "fixed",
+				"length": 19,
+				"colstore": {
+					"inplaceUpdatable": true
+				}
+			},
+			"str0" : { "type" : "strzero" },
+			"str1" : { "type" : "strzero" },
+			"str2" : { "type" : "binary" },
+			"str3" : { "type" : "binary" },
+			"str4" : { "type" : "binary" }
+		}
+	},
+	"TestDupColgroupShould MoveTo ColumnGroups": {
+		"fields": [ "str3", "str4" ],
+		"inplaceUpdatable": false,
+		"dictZipSampleRatio": 0.0
+	},
+	"ColumnGroups": {
+		"str34": {
+			"fields": [ "str3", "str4" ],
+			"inplaceUpdatable": false,
+			"dictZipSampleRatio": 0.0
+		}
+	},
+	"CompressingWorkMemSize" : "10M",
+	"MaxWritingSegmentSize": "20M",
+	"//TableClass": "MockDbTable",
+	"WritableSegmentClass": "trb",
+	"TableIndex" : [
+		{ "fields": "id"  , "ordered" : true, "unique" : true },
+		{ "fields": "str0", "ordered" : true },
+		{ "fields": "str1", "ordered" : true },
+		{ "fields": "str2", "ordered" : true },
+		{ "fields": "fix" , "ordered" : true },
+		{ "fields": "str0,str1", "ordered" : true }
+	]
+}

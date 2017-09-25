@@ -1,0 +1,63 @@
+.svn
+
+# VC
+*.suo
+*.VC.db
+.vs/
+*.obj
+*.ilk
+*.pdb
+*.sbr
+*.tlog
+*.lib
+*.bsc
+*.log
+*.idb
+*.ipdb
+*.iobj
+*.ipch
+*.cache
+*.opendb
+*.lastbuildstate
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+*.dep
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+xcshareddata
+DerivedData
+xcuserdata
+# local.properties
+# userconf.ini
+*.sdf
+*.opensdf
+*.exp
+*.xccheckout
+*.pyc
