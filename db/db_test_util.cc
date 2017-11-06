@@ -295,7 +295,7 @@ Options DBTestBase::GetOptions(
   rocksdb::SyncPoint::GetInstance()->ClearCallBack("NewWritableFile:O_DIRECT");
 #endif
 
-  bool can_allow_mmap = options.allow_mmap_reads || IsMemoryMappedAccessSupported();
+  bool can_allow_mmap = IsMemoryMappedAccessSupported();
   switch (option_config) {
 #ifndef ROCKSDB_LITE
     case kHashSkipList:

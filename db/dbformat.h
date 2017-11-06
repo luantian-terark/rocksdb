@@ -572,7 +572,7 @@ struct RangeTombstone {
   Slice start_key_;
   Slice end_key_;
   SequenceNumber seq_;
-  RangeTombstone() : seq_(SequenceNumber(-1)) {}
+  RangeTombstone() = default;
   RangeTombstone(Slice sk, Slice ek, SequenceNumber sn)
       : start_key_(sk), end_key_(ek), seq_(sn) {}
 
