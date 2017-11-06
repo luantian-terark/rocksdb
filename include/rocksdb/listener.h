@@ -44,9 +44,9 @@ struct TableFileCreationBriefInfo {
 };
 
 struct TableFileCreationInfo : public TableFileCreationBriefInfo {
-  TableFileCreationInfo() : file_size(uint64_t(-1)) {}
+  TableFileCreationInfo() = default;
   explicit TableFileCreationInfo(TableProperties&& prop)
-      : file_size(uint64_t(-1)), table_properties(prop) {}
+      : table_properties(prop) {}
   // the size of the file.
   uint64_t file_size;
   // Detailed properties of the created file.
@@ -146,16 +146,9 @@ struct FlushJobInfo {
 };
 
 struct CompactionJobInfo {
-private:
-  void init();
-public:
-  CompactionJobInfo() {
-    init();
-  }
+  CompactionJobInfo() = default;
   explicit CompactionJobInfo(const CompactionJobStats& _stats) :
-      stats(_stats) {
-    init();
-  }
+      stats(_stats) {}
 
   // the name of the column family where the compaction happened.
   std::string cf_name;
