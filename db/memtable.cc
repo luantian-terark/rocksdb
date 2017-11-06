@@ -627,6 +627,7 @@ static bool SaveValue(void* arg, const char* entry) {
           s->mem->GetLock(s->key->user_key())->ReadLock();
         }
         Slice v = GetLengthPrefixedSlice(key_ptr + key_length);
+        AdjustValueByOffsetLength(&v, *s);
         *(s->status) = Status::OK();
         if (*(s->merge_in_progress)) {
           if (s->value != nullptr) {
@@ -675,6 +676,7 @@ static bool SaveValue(void* arg, const char* entry) {
           return false;
         }
         Slice v = GetLengthPrefixedSlice(key_ptr + key_length);
+        AdjustValueByOffsetLength(&v, *s);
         *(s->merge_in_progress) = true;
         merge_context->PushOperand(
             v, s->inplace_update_support == false /* operand_pinned */);

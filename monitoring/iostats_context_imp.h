@@ -37,7 +37,7 @@ extern __thread IOStatsContext iostats_context;
   PerfStepTimer iostats_step_timer_##metric(&(iostats_context.metric)); \
   iostats_step_timer_##metric.Start();
 
-#else  // ROCKSDB_SUPPORT_THREAD_LOCAL
+#else  // IOS_CROSS_COMPILE
 
 #define IOSTATS_ADD(metric, value)
 #define IOSTATS_ADD_IF_POSITIVE(metric, value)
@@ -49,4 +49,4 @@ extern __thread IOStatsContext iostats_context;
 
 #define IOSTATS_TIMER_GUARD(metric)
 
-#endif  // ROCKSDB_SUPPORT_THREAD_LOCAL
+#endif  // IOS_CROSS_COMPILE

@@ -149,7 +149,7 @@ Status DB::OpenForReadOnly(
                            error_if_log_file_exist);
   if (s.ok()) {
     // set column family handles
-    for (auto cf : column_families) {
+    for (auto& cf : column_families) {
       auto cfd =
           impl->versions_->GetColumnFamilySet()->GetColumnFamily(cf.name);
       if (cfd == nullptr) {
