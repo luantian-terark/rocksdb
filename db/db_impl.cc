@@ -5131,6 +5131,7 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
       mutex_.Unlock();
       delayed = true;
       TEST_SYNC_POINT("DBImpl::DelayWrite:Sleep");
+      delay = std::min<uint64_t>(delay, 1000000); // pls don't death sleep
       // hopefully we don't have to sleep more than 2 billion microseconds
       env_->SleepForMicroseconds(static_cast<int>(delay));
       mutex_.Lock();
