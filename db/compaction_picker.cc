@@ -1636,10 +1636,10 @@ Compaction* UniversalCompactionPicker::PickCompactionUniversalReadAmp(
   size_t start_index = 0;
   unsigned int candidate_count = 0;
 
-  unsigned int max_files_to_compact =
-      std::min(max_merge_width, max_number_of_files_to_compact);
+  unsigned int max_files_to_compact = std::max(2U,
+      std::min(max_merge_width, max_number_of_files_to_compact));
   min_merge_width = std::max(min_merge_width, 2U);
-  max_files_to_compact = std::max(max_files_to_compact, min_merge_width);
+  min_merge_width = std::min(min_merge_width, max_files_to_compact);
 
   LogToBuffer(log_buffer, "[%s] Universal: "
       "ratio = %u, max_files_to_compact = %u, "
