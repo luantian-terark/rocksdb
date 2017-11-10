@@ -1179,7 +1179,7 @@ Status CompactionJob::InstallCompactionResults(
   {
     Compaction::InputLevelSummaryBuffer inputs_summary;
     Log(InfoLogLevel::INFO_LEVEL, db_options_.info_log,
-        "[%s] [JOB %d] Compacted %s => %" PRIu64 " bytes",
+        "[%s] [JOB %d] Compacted  %s => %" PRIu64 " bytes",
         compaction->column_family_data()->GetName().c_str(), job_id_,
         compaction->InputLevelSummary(&inputs_summary), compact_->total_bytes);
   }
