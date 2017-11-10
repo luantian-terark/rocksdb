@@ -1639,6 +1639,15 @@ Compaction* UniversalCompactionPicker::PickCompactionUniversalReadAmp(
   unsigned int max_files_to_compact =
       std::min(max_merge_width, max_number_of_files_to_compact);
   min_merge_width = std::max(min_merge_width, 2U);
+  max_files_to_compact = std::max(max_files_to_compact, min_merge_width);
+
+  LogToBuffer(log_buffer, "[%s] Universal: "
+      "ratio = %u, max_files_to_compact = %u, "
+      "min_merge_width = %u, max_merge_width = %u"
+      , cf_name.c_str()
+      , ratio, max_files_to_compact
+      , min_merge_width, max_merge_width
+      );
 
   // Caller checks the size before executing this function. This invariant is
   // important because otherwise we may have a possible integer underflow when
@@ -1757,7 +1766,7 @@ Compaction* UniversalCompactionPicker::PickCompactionUniversalReadAmp(
   }
 
   uint64_t estimated_total_size = 0;
-  for (unsigned int i = 0; i < first_index_after; i++) {
+  for (unsigned int i = start_index; i < first_index_after; i++) {
     estimated_total_size += sorted_runs[i].size;
   }
   uint32_t path_id = GetPathId(ioptions_, estimated_total_size);
