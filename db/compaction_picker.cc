@@ -1701,7 +1701,12 @@ Compaction* UniversalCompactionPicker::PickCompactionUniversalReadAmp(
       // default kCompactionStopStyleTotalSize; with
       // kCompactionStopStyleSimilarSize, it's simply the size of the last
       // picked file.
-      double sz = candidate_size * (100.0 + ratio) / 100.0;
+      double sz;
+      if (loop + 1 == i)
+        sz = candidate_size * 1.3;
+      else
+        sz = candidate_size * (100.0 + ratio) / 100.0;
+
       if (sz < static_cast<double>(succeeding_sr->size)) {
         break;
       }
