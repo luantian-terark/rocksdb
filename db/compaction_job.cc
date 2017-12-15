@@ -1237,10 +1237,10 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
   sub_compact->partial_remove_info.largest = current_internal_key;
   ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
   auto inputs = compact_->compaction->inputs();
-  auto& smallest = sub_compact->partial_remove_info.smallest;
-  auto& largest = sub_compact->partial_remove_info.largest;
+  const auto& smallest = sub_compact->partial_remove_info.smallest;
+  const auto& largest = sub_compact->partial_remove_info.largest;
   auto find_overlap =
-    [cfd, inputs, &smallest, &largest](const std::vector<FileMetaData *>& files) {
+    [cfd, &smallest, &largest](const std::vector<FileMetaData *>& files) {
     auto left = std::lower_bound(files.begin(), files.end(), smallest,
       [=](const FileMetaData* l, const InternalKey& r) {
       return cfd->internal_comparator().Compare(l->largest, r) < 0;
@@ -1253,24 +1253,32 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
   };
   int output_level = compact_->compaction->output_level();
   if (output_level == 0) {
+    // ignore level 0
     return false;
   }
   auto it = std::find_if(inputs->rbegin(), inputs->rend(),
     [output_level](const CompactionInputFiles& level) {
     return level.level == output_level;
   });
-  if (it == inputs->rend()) {
-    return false;
-  }
-  if (!it->files.empty()) {
+  // make sure output level sst partial removable
+  if (it != inputs->rend() && !it->files.empty()) {
     auto overlap = find_overlap(it->files);
-    if (overlap.first >= overlap.second) {
-      return false;
+    // none overlap if overlap.first > overlap.second
+    // partial remove is ok if overlap.first < overlap.second
+    if (overlap.first == overlap.second) {
+      auto file = it->files[overlap.first];
+      if (cfd->internal_comparator().Compare(smallest, file->smallest) > 0
+        && cfd->internal_comparator().Compare(largest, file->largest) < 0) {
+        // output sst can't partial remove in middle ...
+        // wait more outputs
+        return false;
+      }
     }
   }
   sub_compact->partial_remove_info.files.clear();
   for (auto& level : *inputs) {
     if (level.level == 0) {
+      // each level 0 sst need check
       for (auto& file : level.files) {
         if (cfd->internal_comparator().Compare(smallest, file->smallest) <= 0
           && cfd->internal_comparator().Compare(largest, file->largest) >= 0) {
@@ -1287,9 +1295,11 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
         continue;
       }
       if (cfd->internal_comparator().Compare(level.files[overlap.first]->smallest, smallest) < 0) {
+        // can't cover left
         ++overlap.first;
       }
       if (cfd->internal_comparator().Compare(level.files[overlap.second]->largest, largest) > 0) {
+        // can't cover right
         --overlap.second;
       }
       for (auto i = overlap.first; i <= overlap.second; ++i) {
