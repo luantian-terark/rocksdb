@@ -107,6 +107,8 @@ struct FileMetaData {
   bool marked_for_compaction;  // True if client asked us nicely to compact this
                                // file.
 
+  uint8_t partial_removed;     // iterator need wrapper if non zero
+
   FileMetaData()
       : smallest_seqno(kMaxSequenceNumber),
         largest_seqno(0),
@@ -119,7 +121,8 @@ struct FileMetaData {
         refs(0),
         being_compacted(false),
         init_stats_from_file(false),
-        marked_for_compaction(false) {}
+        marked_for_compaction(false),
+        partial_removed(0) {}
 
   // REQUIRED: Keys must be given to the function in sorted order (it expects
   // the last key to be the largest).
@@ -207,7 +210,7 @@ class VersionEdit {
                uint64_t file_size, const InternalKey& smallest,
                const InternalKey& largest, const SequenceNumber& smallest_seqno,
                const SequenceNumber& largest_seqno,
-               bool marked_for_compaction) {
+               bool marked_for_compaction, uint8_t partial_removed) {
     assert(smallest_seqno <= largest_seqno);
     FileMetaData f;
     f.fd = FileDescriptor(file, file_path_id, file_size);
@@ -216,6 +219,7 @@ class VersionEdit {
     f.smallest_seqno = smallest_seqno;
     f.largest_seqno = largest_seqno;
     f.marked_for_compaction = marked_for_compaction;
+    f.partial_removed = partial_removed;
     new_files_.emplace_back(level, std::move(f));
   }
 

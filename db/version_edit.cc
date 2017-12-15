@@ -44,6 +44,7 @@ enum Tag {
 enum CustomTag {
   kTerminate = 1,  // The end of customized fields
   kNeedCompaction = 2,
+  kPartialRemoved = 3,
   kPathId = 65,
 };
 // If this bit for the custom tag is set, opening DB should fail if
@@ -165,6 +166,11 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
         char p = static_cast<char>(1);
         PutLengthPrefixedSlice(dst, Slice(&p, 1));
       }
+      if (f.partial_removed) {
+          PutVarint32(dst, CustomTag::kPartialRemoved);
+          char p = static_cast<char>(f.partial_removed);
+          PutLengthPrefixedSlice(dst, Slice(&p, 1));
+      }
       TEST_SYNC_POINT_CALLBACK("VersionEdit::EncodeTo:NewFile4:CustomizeFields",
                                dst);
 
@@ -251,6 +257,12 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
             return "need_compaction field wrong size";
           }
           f.marked_for_compaction = (field[0] == 1);
+          break;
+        case kPartialRemoved:
+          if (field.size() != 1) {
+            return "partial_removed field wrong size";
+          }
+          f.partial_removed = static_cast<uint8_t>(field[0]);
           break;
         default:
           if ((custom_tag & kCustomTagNonSafeIgnoreMask) != 0) {

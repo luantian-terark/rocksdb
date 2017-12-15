@@ -62,6 +62,13 @@
 
 namespace rocksdb {
 
+struct PartialRemoveInfo {
+  // from seek(begin) to seek_for_prev(end) has been removed
+  InternalKey smallest;
+  InternalKey largest;
+  std::vector<FileMetaData*> files; // full cover files
+};
+
 // Maintains state for each sub-compaction
 struct CompactionJob::SubcompactionState {
   const Compaction* compaction;
@@ -71,6 +78,8 @@ struct CompactionJob::SubcompactionState {
   // subcompactions may have overlapping key-ranges.
   // 'start' is inclusive, 'end' is exclusive, and nullptr means unbounded
   Slice *start, *end;
+
+  PartialRemoveInfo partial_remove_info;
 
   // The return status of this subcompaction
   Status status;
@@ -756,6 +765,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   } else {
     input->SeekToFirst();
   }
+  sub_compact->partial_remove_info.smallest.DecodeFrom(input->key());
 
   // we allow only 1 compaction event listener. Used by blob storage
   CompactionEventListener* comp_event_listener = nullptr;
@@ -886,6 +896,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     // and 0.6MB instead of 1MB and 0.2MB)
     bool output_file_ended = false;
     Status input_status;
+    InternalKey current_input_key;
+    current_input_key.DecodeFrom(input->key());
     if (sub_compact->compaction->output_level() != 0 &&
         sub_compact->current_output_file_size >=
             sub_compact->compaction->max_output_file_size()) {
@@ -927,6 +939,9 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         } else {
           sub_compact->compression_dict = std::move(dict_sample_data);
         }
+      }
+      if (ShouldFinishCompaction(sub_compact, current_input_key)) {
+        //TODO
       }
     }
   }
@@ -1163,44 +1178,45 @@ Status CompactionJob::FinishCompactionOutputFile(
                      " keys, %" PRIu64 " bytes%s",
                      cfd->GetName().c_str(), job_id_, output_number,
                      current_entries, current_bytes,
-                     meta->marked_for_compaction ? " (need compaction)" : "");
+meta->marked_for_compaction ? " (need compaction)" : "");
     }
   }
   std::string fname;
   FileDescriptor output_fd;
   if (meta != nullptr) {
     fname = TableFileName(db_options_.db_paths, meta->fd.GetNumber(),
-                          meta->fd.GetPathId());
+      meta->fd.GetPathId());
     output_fd = meta->fd;
-  } else {
+  }
+  else {
     fname = "(nil)";
   }
   EventHelpers::LogAndNotifyTableFileCreationFinished(
-      event_logger_, cfd->ioptions()->listeners, dbname_, cfd->GetName(), fname,
-      job_id_, output_fd, tp, TableFileCreationReason::kCompaction, s);
+    event_logger_, cfd->ioptions()->listeners, dbname_, cfd->GetName(), fname,
+    job_id_, output_fd, tp, TableFileCreationReason::kCompaction, s);
 
 #ifndef ROCKSDB_LITE
   // Report new file to SstFileManagerImpl
   auto sfm =
-      static_cast<SstFileManagerImpl*>(db_options_.sst_file_manager.get());
+    static_cast<SstFileManagerImpl*>(db_options_.sst_file_manager.get());
   if (sfm && meta != nullptr && meta->fd.GetPathId() == 0) {
     auto fn = TableFileName(cfd->ioptions()->db_paths, meta->fd.GetNumber(),
-                            meta->fd.GetPathId());
+      meta->fd.GetPathId());
     sfm->OnAddFile(fn);
     if (sfm->IsMaxAllowedSpaceReached()) {
       // TODO(ajkr): should we return OK() if max space was reached by the final
       // compaction output file (similarly to how flush works when full)?
       s = Status::IOError("Max allowed space was reached");
       TEST_SYNC_POINT(
-          "CompactionJob::FinishCompactionOutputFile:"
-          "MaxAllowedSpaceReached");
+        "CompactionJob::FinishCompactionOutputFile:"
+        "MaxAllowedSpaceReached");
       InstrumentedMutexLock l(db_mutex_);
       if (db_bg_error_->ok()) {
         Status new_bg_error = s;
         // may temporarily unlock and lock the mutex.
         EventHelpers::NotifyOnBackgroundError(
-            cfd->ioptions()->listeners, BackgroundErrorReason::kCompaction,
-            &new_bg_error, db_mutex_);
+          cfd->ioptions()->listeners, BackgroundErrorReason::kCompaction,
+          &new_bg_error, db_mutex_);
         if (!new_bg_error.ok()) {
           *db_bg_error_ = new_bg_error;
         }
@@ -1212,6 +1228,76 @@ Status CompactionJob::FinishCompactionOutputFile(
   sub_compact->builder.reset();
   sub_compact->current_output_file_size = 0;
   return s;
+}
+
+
+bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
+    const InternalKey& current_internal_key) {
+
+  sub_compact->partial_remove_info.largest = current_internal_key;
+  ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
+  auto inputs = compact_->compaction->inputs();
+  auto& smallest = sub_compact->partial_remove_info.smallest;
+  auto& largest = sub_compact->partial_remove_info.largest;
+  auto find_overlap =
+    [cfd, inputs, &smallest, &largest](const std::vector<FileMetaData *>& files) {
+    auto left = std::lower_bound(files.begin(), files.end(), smallest,
+      [=](const FileMetaData* l, const InternalKey& r) {
+      return cfd->internal_comparator().Compare(l->largest, r) < 0;
+    });
+    auto right = std::lower_bound(files.rbegin(), files.rend(), largest,
+      [=](const FileMetaData* l, const InternalKey& r) {
+      return cfd->internal_comparator().Compare(l->smallest, r) > 0;
+    });
+    return std::make_pair(left - files.begin(), files.rend() - right - 1);
+  };
+  int output_level = compact_->compaction->output_level();
+  if (output_level == 0) {
+    return false;
+  }
+  auto it = std::find_if(inputs->rbegin(), inputs->rend(),
+    [output_level](const CompactionInputFiles& level) {
+    return level.level == output_level;
+  });
+  if (it == inputs->rend()) {
+    return false;
+  }
+  if (!it->files.empty()) {
+    auto overlap = find_overlap(it->files);
+    if (overlap.first >= overlap.second) {
+      return false;
+    }
+  }
+  sub_compact->partial_remove_info.files.clear();
+  for (auto& level : *inputs) {
+    if (level.level == 0) {
+      for (auto& file : level.files) {
+        if (cfd->internal_comparator().Compare(smallest, file->smallest) <= 0
+          && cfd->internal_comparator().Compare(largest, file->largest) >= 0) {
+          sub_compact->partial_remove_info.files.push_back(file);
+        }
+      }
+    }
+    else {
+      if (level.files.empty()) {
+        continue;
+      }
+      auto overlap = find_overlap(level.files);
+      if (overlap.first > overlap.second) {
+        continue;
+      }
+      if (cfd->internal_comparator().Compare(level.files[overlap.first]->smallest, smallest) < 0) {
+        ++overlap.first;
+      }
+      if (cfd->internal_comparator().Compare(level.files[overlap.second]->largest, largest) > 0) {
+        --overlap.second;
+      }
+      for (auto i = overlap.first; i <= overlap.second; ++i) {
+        sub_compact->partial_remove_info.files.push_back(level.files[i]);
+      }
+    }
+  }
+  return !sub_compact->partial_remove_info.files.empty();
 }
 
 Status CompactionJob::InstallCompactionResults(

@@ -3509,7 +3509,7 @@ Status VersionSet::WriteSnapshot(log::Writer* log) {
           edit.AddFile(level, f->fd.GetNumber(), f->fd.GetPathId(),
                        f->fd.GetFileSize(), f->smallest, f->largest,
                        f->smallest_seqno, f->largest_seqno,
-                       f->marked_for_compaction);
+                       f->marked_for_compaction, f->partial_removed);
         }
       }
       edit.SetLogNumber(cfd->GetLogNumber());
