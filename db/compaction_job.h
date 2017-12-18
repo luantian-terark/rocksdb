@@ -106,7 +106,7 @@ class CompactionJob {
       CompactionIterationStats* range_del_out_stats,
       const Slice* next_table_min_key = nullptr);
   bool ShouldFinishCompaction(SubcompactionState* sub_compact,
-      const InternalKey& current_internal_key);
+      Slice next_key);
   Status InstallCompactionResults(const MutableCFOptions& mutable_cf_options);
   void RecordCompactionIOStats();
   Status OpenCompactionOutputFile(SubcompactionState* sub_compact);

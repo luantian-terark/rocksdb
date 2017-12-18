@@ -7,12 +7,98 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include "db/dbformat.h"
 #include "rocksdb/iterator.h"
 #include "table/internal_iterator.h"
 #include "table/iterator_wrapper.h"
 #include "util/arena.h"
 
 namespace rocksdb {
+
+class RangeWrappedInternalIterator : public InternalIterator {
+public:
+  RangeWrappedInternalIterator(InternalIterator* iter,
+    const InternalKeyComparator& internal_key_comp,
+    const InternalKey& smallest, const InternalKey& largest)
+    : iter_(iter)
+    , ic_(internal_key_comp)
+    , smallest_(smallest)
+    , largest_(largest)
+  {}
+
+  bool Valid() const override final {
+    return iter_->Valid();
+  }
+  void SeekToFirst() override final {
+    iter_->Seek(smallest_.Encode());
+  }
+  void SeekToLast() override final {
+    iter_->SeekForPrev(largest_.Encode());
+  }
+  void Seek(const Slice& target) override final {
+    if (ic_.Compare(target, smallest_.Encode()) <= 0) {
+      iter_->Seek(smallest_.Encode());
+    }
+    else {
+      iter_->Seek(target);
+      if (ic_.Compare(iter_->key(), largest_.Encode()) > 0) {
+        iter_->SeekToLast();
+        iter_->Next();
+      }
+    }
+  }
+  void SeekForPrev(const Slice& target) override final {
+    if (ic_.Compare(target, largest_.Encode()) >= 0) {
+      iter_->SeekForPrev(largest_.Encode());
+    }
+    else {
+      iter_->SeekForPrev(target);
+      if (ic_.Compare(target, smallest_.Encode()) < 0) {
+        iter_->SeekToFirst();
+        iter_->Prev();
+      }
+    }
+  }
+  void Next() override final {
+    if (ic_.Compare(iter_->key(), largest_.Encode()) >= 0) {
+      iter_->SeekToLast();
+    }
+    iter_->Next();
+  }
+  void Prev() override final {
+    if (ic_.Compare(iter_->key(), smallest_.Encode()) <= 0) {
+      iter_->SeekToFirst();
+    }
+    iter_->Prev();
+  }
+  Slice key() const override final {
+    return iter_->key();
+  }
+  Slice value() const override final {
+    return iter_->value();
+  }
+  Status status() const override final {
+    return iter_->status();
+  }
+  void SetPinnedItersMgr(PinnedIteratorsManager* pinned_iters_mgr) override final {
+    iter_->SetPinnedItersMgr(pinned_iters_mgr);
+  }
+  bool IsKeyPinned() const override final {
+    return iter_->IsKeyPinned();
+  }
+  bool IsValuePinned() const override final {
+    return iter_->IsValuePinned();
+  }
+  Status GetProperty(std::string prop_name, std::string* prop) override final {
+    return iter_->GetProperty(prop_name, prop);
+  }
+
+private:
+  InternalIterator * iter_;
+  const InternalKeyComparator& ic_;
+  InternalKey smallest_;
+  InternalKey largest_;
+};
 
 Cleanable::Cleanable() {
   cleanup_.function = nullptr;
@@ -162,6 +248,13 @@ Iterator* NewEmptyIterator() {
 
 Iterator* NewErrorIterator(const Status& status) {
   return new EmptyIterator(status);
+}
+
+InternalIterator* NewRangeWrappedInternalIterator(
+  InternalIterator* iter,
+  const InternalKeyComparator& ic,
+  const InternalKey& smallest, const InternalKey& largest) {
+  return new RangeWrappedInternalIterator(iter, ic, smallest, largest);
 }
 
 InternalIterator* NewEmptyInternalIterator() {

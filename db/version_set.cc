@@ -437,7 +437,6 @@ class LevelFileNumIterator : public InternalIterator {
       : icmp_(icmp),
         flevel_(flevel),
         index_(static_cast<uint32_t>(flevel->num_files)),
-        current_value_(0, 0, 0),  // Marks as invalid
         should_sample_(should_sample) {}
   virtual bool Valid() const override { return index_ < flevel_->num_files; }
   virtual void Seek(const Slice& target) override {
@@ -476,9 +475,8 @@ class LevelFileNumIterator : public InternalIterator {
     if (should_sample_) {
       sample_file_read_inc(file_meta.file_metadata);
     }
-    current_value_ = file_meta.fd;
-    return Slice(reinterpret_cast<const char*>(&current_value_),
-                 sizeof(FileDescriptor));
+    return Slice(reinterpret_cast<const char*>(file_meta.file_metadata),
+                 sizeof(*file_meta.file_metadata));
   }
   virtual Status status() const override { return Status::OK(); }
 
@@ -486,7 +484,6 @@ class LevelFileNumIterator : public InternalIterator {
   const InternalKeyComparator icmp_;
   const LevelFilesBrief* flevel_;
   uint32_t index_;
-  mutable FileDescriptor current_value_;
   bool should_sample_;
 };
 
@@ -512,14 +509,14 @@ class LevelFileIteratorState : public TwoLevelIteratorState {
         range_del_agg_(range_del_agg) {}
 
   InternalIterator* NewSecondaryIterator(const Slice& meta_handle) override {
-    if (meta_handle.size() != sizeof(FileDescriptor)) {
+    if (meta_handle.size() != sizeof(FileMetaData)) {
       return NewErrorInternalIterator(
           Status::Corruption("FileReader invoked with unexpected value"));
     }
-    const FileDescriptor* fd =
-        reinterpret_cast<const FileDescriptor*>(meta_handle.data());
+    const FileMetaData* meta =
+        reinterpret_cast<const FileMetaData*>(meta_handle.data());
     return table_cache_->NewIterator(
-        read_options_, env_options_, icomparator_, *fd, range_del_agg_,
+        read_options_, env_options_, icomparator_, *meta, range_del_agg_,
         nullptr /* don't need reference to table */, file_read_hist_,
         for_compaction_, nullptr /* arena */, skip_filters_, level_);
   }
@@ -841,7 +838,7 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
     for (size_t i = 0; i < storage_info_.LevelFilesBrief(0).num_files; i++) {
       const auto& file = storage_info_.LevelFilesBrief(0).files[i];
       merge_iter_builder->AddIterator(cfd_->table_cache()->NewIterator(
-          read_options, soptions, cfd_->internal_comparator(), file.fd,
+          read_options, soptions, cfd_->internal_comparator(), *file.file_metadata,
           range_del_agg, nullptr, cfd_->internal_stats()->GetFileReadHist(0),
           false, arena, false /* skip_filters */, 0 /* level */));
     }
@@ -3628,7 +3625,7 @@ uint64_t VersionSet::ApproximateSize(Version* v, const FdWithKeyRange& f,
     // approximate offset of "key" within the table.
     TableReader* table_reader_ptr;
     InternalIterator* iter = v->cfd_->table_cache()->NewIterator(
-        ReadOptions(), v->env_options_, v->cfd_->internal_comparator(), f.fd,
+        ReadOptions(), v->env_options_, v->cfd_->internal_comparator(), *f.file_metadata,
         nullptr /* range_del_agg */, &table_reader_ptr);
     if (table_reader_ptr != nullptr) {
       result = table_reader_ptr->ApproximateOffsetOf(key);
@@ -3708,7 +3705,7 @@ InternalIterator* VersionSet::MakeInputIterator(
         for (size_t i = 0; i < flevel->num_files; i++) {
           list[num++] = cfd->table_cache()->NewIterator(
               read_options, env_options_compactions, cfd->internal_comparator(),
-              flevel->files[i].fd, range_del_agg,
+              *flevel->files[i].file_metadata, range_del_agg,
               nullptr /* table_reader_ptr */,
               nullptr /* no per level latency histogram */,
               true /* for_compaction */, nullptr /* arena */,

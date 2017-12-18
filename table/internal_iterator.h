@@ -14,6 +14,8 @@
 namespace rocksdb {
 
 class PinnedIteratorsManager;
+class InternalKeyComparator;
+class InternalKey;
 
 class InternalIterator : public Cleanable {
  public:
@@ -111,6 +113,11 @@ class InternalIterator : public Cleanable {
   InternalIterator(const InternalIterator&) = delete;
   InternalIterator& operator=(const InternalIterator&) = delete;
 };
+
+extern InternalIterator* NewRangeWrappedInternalIterator(
+  InternalIterator* iter,
+  const InternalKeyComparator& internal_key_comp,
+  const InternalKey& smallest, const InternalKey& largest);
 
 // Return an empty iterator (yields nothing).
 extern InternalIterator* NewEmptyInternalIterator();

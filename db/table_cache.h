@@ -29,6 +29,7 @@ namespace rocksdb {
 class Env;
 class Arena;
 struct FileDescriptor;
+struct FileMetaData;
 class GetContext;
 class HistogramImpl;
 class InternalIterator;
@@ -53,7 +54,7 @@ class TableCache {
   InternalIterator* NewIterator(
       const ReadOptions& options, const EnvOptions& toptions,
       const InternalKeyComparator& internal_comparator,
-      const FileDescriptor& file_fd, RangeDelAggregator* range_del_agg,
+      const FileMetaData& file_meta, RangeDelAggregator* range_del_agg,
       TableReader** table_reader_ptr = nullptr,
       HistogramImpl* file_read_hist = nullptr, bool for_compaction = false,
       Arena* arena = nullptr, bool skip_filters = false, int level = -1);

@@ -170,12 +170,13 @@ Status TableCache::FindTable(const EnvOptions& env_options,
 
 InternalIterator* TableCache::NewIterator(
     const ReadOptions& options, const EnvOptions& env_options,
-    const InternalKeyComparator& icomparator, const FileDescriptor& fd,
+    const InternalKeyComparator& icomparator, const FileMetaData& meta,
     RangeDelAggregator* range_del_agg, TableReader** table_reader_ptr,
     HistogramImpl* file_read_hist, bool for_compaction, Arena* arena,
     bool skip_filters, int level) {
   PERF_TIMER_GUARD(new_table_iterator_nanos);
 
+  auto& fd = meta.fd;
   Status s;
   bool create_new_table_reader = false;
   TableReader* table_reader = nullptr;
@@ -230,6 +231,19 @@ InternalIterator* TableCache::NewIterator(
       result = NewEmptyInternalIterator(arena);
     } else {
       result = table_reader->NewIterator(options, arena, skip_filters);
+      if (meta.partial_removed) {
+        InternalIterator* wrapper = NewRangeWrappedInternalIterator(
+          result, icomparator, meta.smallest, meta.largest);
+        wrapper->RegisterCleanup([](void* arg1, void* arg2) {
+          auto iter = reinterpret_cast<InternalIterator*>(arg1);
+          if (arg2) {
+            iter->~InternalIterator();
+          } else {
+            delete iter;
+          }
+        }, result, arena);
+        result = wrapper;
+      }
     }
     if (create_new_table_reader) {
       assert(handle == nullptr);
