@@ -107,7 +107,6 @@ class VersionBuilder::Rep {
   bool has_invalid_levels_;
   FileComparator level_zero_cmp_;
   FileComparator level_nonzero_cmp_;
-  FileNumberComparator file_num_cmp_;
 
  public:
   Rep(const EnvOptions& env_options, Logger* info_log, TableCache* table_cache,
@@ -345,15 +344,17 @@ class VersionBuilder::Rep {
         if (!base_files.empty()) {
           // first sort added files with file num
           std::sort(added_files.begin(), added_files.begin() + add_files_size,
-            file_num_cmp_);
+            FileNumberComparator());
           // then remove base files
-          added_files.erase(std::remove_if(
-            added_files.begin() + add_files_size, added_files.end(),
+          auto is_added_file =
             [this, &added_files, add_files_size](FileMetaData* meta) {
             return std::binary_search(added_files.begin(),
               added_files.begin() + add_files_size,
-              meta, file_num_cmp_);
-          }), added_files.end());
+              meta, FileNumberComparator());
+          };
+          added_files.erase(std::remove_if(
+            added_files.begin() + add_files_size, added_files.end(),
+            is_added_file), added_files.end());
         }
         std::sort(added_files.begin(), added_files.end(), cmp);
       }

@@ -24,60 +24,72 @@ public:
     , ic_(internal_key_comp)
     , smallest_(smallest)
     , largest_(largest)
-  {}
+    , invalid_(false) {
+    assert(iter_);
+    assert(ic_.Compare(smallest, largest) <= 0);
+  }
 
   bool Valid() const override final {
-    return iter_->Valid();
+    return !invalid_ && iter_->Valid();
   }
   void SeekToFirst() override final {
+    invalid_ = false;
     iter_->Seek(smallest_.Encode());
   }
   void SeekToLast() override final {
+    invalid_ = false;
     iter_->SeekForPrev(largest_.Encode());
   }
   void Seek(const Slice& target) override final {
+    invalid_ = false;
     if (ic_.Compare(target, smallest_.Encode()) <= 0) {
       iter_->Seek(smallest_.Encode());
     }
     else {
       iter_->Seek(target);
       if (ic_.Compare(iter_->key(), largest_.Encode()) > 0) {
-        iter_->SeekToLast();
-        iter_->Next();
+        invalid_ = true;
       }
     }
   }
   void SeekForPrev(const Slice& target) override final {
+    invalid_ = false;
     if (ic_.Compare(target, largest_.Encode()) >= 0) {
       iter_->SeekForPrev(largest_.Encode());
     }
     else {
       iter_->SeekForPrev(target);
       if (ic_.Compare(target, smallest_.Encode()) < 0) {
-        iter_->SeekToFirst();
-        iter_->Prev();
+        invalid_ = true;
       }
     }
   }
   void Next() override final {
-    if (ic_.Compare(iter_->key(), largest_.Encode()) >= 0) {
-      iter_->SeekToLast();
-    }
+    assert(!invalid_);
     iter_->Next();
+    if (ic_.Compare(iter_->key(), largest_.Encode()) >= 0) {
+      invalid_ = true;
+    }
   }
   void Prev() override final {
-    if (ic_.Compare(iter_->key(), smallest_.Encode()) <= 0) {
-      iter_->SeekToFirst();
-    }
+    assert(!invalid_);
     iter_->Prev();
+    if (ic_.Compare(iter_->key(), smallest_.Encode()) <= 0) {
+      invalid_ = true;
+    }
   }
   Slice key() const override final {
+    assert(!invalid_);
     return iter_->key();
   }
   Slice value() const override final {
+    assert(!invalid_);
     return iter_->value();
   }
   Status status() const override final {
+    if (invalid_) {
+      return Status::Corruption("Out of range");
+    }
     return iter_->status();
   }
   void SetPinnedItersMgr(PinnedIteratorsManager* pinned_iters_mgr) override final {
@@ -98,6 +110,7 @@ private:
   const InternalKeyComparator& ic_;
   InternalKey smallest_;
   InternalKey largest_;
+  bool invalid_;
 };
 
 Cleanable::Cleanable() {

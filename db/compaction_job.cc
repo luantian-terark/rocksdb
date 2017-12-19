@@ -89,11 +89,11 @@ std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
   const InternalKey& smallest,
   const InternalKey& largest) {
   auto left = std::lower_bound(files.begin(), files.end(), smallest,
-    [=](const meta& l, const InternalKey& r) {
+    [&ic](const meta& l, const InternalKey& r) {
     return ic.Compare(l->largest, r) < 0;
   });
   auto right = std::lower_bound(files.rbegin(), files.rend(), largest,
-    [=](const meta& l, const InternalKey& r) {
+    [&ic](const meta& l, const InternalKey& r) {
     return ic.Compare(l->smallest, r) > 0;
   });
   return std::make_pair(left - files.begin(), files.rend() - right - 1);
@@ -1383,19 +1383,19 @@ Status CompactionJob::InstallCompactionResults(
     compact_->sub_compact_states.end(), [](const CompactionJob::SubcompactionState& s) {
     return s.partial_remove_info.active;
   }) != compact_->sub_compact_states.end()) {
-    auto inputs = *compaction->inputs();  // deep copy
+    auto inputs = compaction->inputs();
     auto& ic = compaction->column_family_data()->internal_comparator();
 
     std::vector<std::pair<int, std::vector<PartialRemoveMetaData>>> inputs_pick;
-    for (auto& level : inputs) {
+    for (auto& level : *inputs) {
       std::vector<PartialRemoveMetaData> level_pick;
       for (auto& file : level.files) {
-        PartialRemoveMetaData update;
-        update.file = file;
-        update.smallest = file->smallest;
-        update.largest = file->largest;
-        update.partial_removed = file->partial_removed;
-        level_pick.emplace_back(std::move(update));
+        PartialRemoveMetaData meta;
+        meta.file = file;
+        meta.smallest = file->smallest;
+        meta.largest = file->largest;
+        meta.partial_removed = file->partial_removed;
+        level_pick.emplace_back(std::move(meta));
       }
       inputs_pick.emplace_back(level.level, std::move(level_pick));
     }
@@ -1404,8 +1404,10 @@ Status CompactionJob::InstallCompactionResults(
       const InternalKey& smallest,
       const InternalKey& largest) {
 
+      auto table_reader = meta->file->fd.table_reader;
+      assert(table_reader);
       if (!meta->iter) {
-        meta->iter.reset(meta->file->fd.table_reader->NewIterator(ReadOptions()));
+        meta->iter.reset(table_reader->NewIterator(ReadOptions()));
       }
       auto iter = meta->iter.get();
       if (ic.Compare(largest, meta->smallest) >= 0) {
@@ -1440,8 +1442,6 @@ Status CompactionJob::InstallCompactionResults(
       if (ic.Compare(meta->smallest, meta->largest) > 0) {
         return false;
       }
-      auto table_reader = meta->file->fd.table_reader;
-      assert(table_reader);
       if (meta->sst_size == 0) {
         iter->SeekToLast();
         meta->sst_size = std::max<uint64_t>(1,
