@@ -5682,20 +5682,20 @@ Status DBImpl::DeleteFile(std::string name) {
     for (int i = level + 1; i < cfd->NumberLevels(); i++) {
       if (vstoreage->NumLevelFiles(i) != 0) {
         Log(InfoLogLevel::WARN_LEVEL, immutable_db_options_.info_log,
-            "DeleteFile %s FAILED. File not in last level\n", name.c_str());
-        job_context.Clean();
-        return Status::InvalidArgument("File not in last level");
+            "False DeleteFile %s in level %d. File not in last level. by terark\n", name.c_str(), level);
+        // job_context.Clean();
+        // return Status::InvalidArgument("File not in last level");
       }
     }
     // if level == 0, it has to be the oldest file
     if (level == 0 &&
         vstoreage->LevelFiles(0).back()->fd.GetNumber() != number) {
       Log(InfoLogLevel::WARN_LEVEL, immutable_db_options_.info_log,
-          "DeleteFile %s failed ---"
-          " target file in level 0 must be the oldest.",
-          name.c_str());
-      job_context.Clean();
-      return Status::InvalidArgument("File in level 0, but not oldest");
+          "False DeleteFile %s in level %d ---"
+          " target file in level 0 must be the oldest. by terark",
+          name.c_str(), level);
+      // job_context.Clean();
+      // return Status::InvalidArgument("File in level 0, but not oldest");
     }
     edit.SetColumnFamily(cfd->GetID());
     edit.DeleteFile(level, number);
