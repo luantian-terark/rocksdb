@@ -45,6 +45,7 @@ enum CustomTag {
   kTerminate = 1,  // The end of customized fields
   kNeedCompaction = 2,
   kPartialRemoved = 3,
+  kExpandRangeSet = 4,
   kPathId = 65,
 };
 // If this bit for the custom tag is set, opening DB should fail if
@@ -106,7 +107,7 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
 
   for (size_t i = 0; i < new_files_.size(); i++) {
     const FileMetaData& f = new_files_[i].second;
-    if (!f.smallest.Valid() || !f.largest.Valid()) {
+    if (!f.range_set.front().Valid() || !f.largest().Valid()) {
       return false;
     }
     bool has_customized_fields = false;
@@ -126,8 +127,8 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
       PutVarint32(dst, f.fd.GetPathId());
     }
     PutVarint64(dst, f.fd.GetFileSize());
-    PutLengthPrefixedSlice(dst, f.smallest.Encode());
-    PutLengthPrefixedSlice(dst, f.largest.Encode());
+    PutLengthPrefixedSlice(dst, f.smallest().Encode());
+    PutLengthPrefixedSlice(dst, f.largest().Encode());
     PutVarint64Varint64(dst, f.smallest_seqno, f.largest_seqno);
     if (has_customized_fields) {
       // Customized fields' format:
@@ -170,6 +171,10 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
           PutVarint32(dst, CustomTag::kPartialRemoved);
           char p = static_cast<char>(f.partial_removed);
           PutLengthPrefixedSlice(dst, Slice(&p, 1));
+      }
+      for (size_t ri = 1; ri < f.range_set.size() - 1; ++ri) {
+        PutVarint32(dst, CustomTag::kExpandRangeSet);
+        PutLengthPrefixedSlice(dst, f.range_set[ri].Encode());
       }
       TEST_SYNC_POINT_CALLBACK("VersionEdit::EncodeTo:NewFile4:CustomizeFields",
                                dst);
@@ -224,9 +229,12 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
   uint64_t number;
   uint32_t path_id = 0;
   uint64_t file_size;
+  InternalKey largest;
+  f.range_set.resize(1);
   if (GetLevel(input, &level, &msg) && GetVarint64(input, &number) &&
-      GetVarint64(input, &file_size) && GetInternalKey(input, &f.smallest) &&
-      GetInternalKey(input, &f.largest) &&
+      GetVarint64(input, &file_size) &&
+      GetInternalKey(input, &f.smallest()) &&
+      GetInternalKey(input, &largest) &&
       GetVarint64(input, &f.smallest_seqno) &&
       GetVarint64(input, &f.largest_seqno)) {
     // See comments in VersionEdit::EncodeTo() for format of customized fields
@@ -264,6 +272,12 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
           }
           f.partial_removed = static_cast<uint8_t>(field[0]);
           break;
+        case kExpandRangeSet:
+          f.range_set.emplace_back();
+          f.range_set.back().DecodeFrom(field);
+          if (!f.range_set.back().Valid()) {
+            return "hole_set field invalid internal key";
+          }
         default:
           if ((custom_tag & kCustomTagNonSafeIgnoreMask) != 0) {
             // Should not proceed if cannot understand it
@@ -274,6 +288,10 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
     }
   } else {
     return "new-file4 entry";
+  }
+  f.range_set.emplace_back(std::move(largest));
+  if (f.range_set.size() % 2 != 0) {
+    return "range_set field wrong element count";
   }
   f.fd = FileDescriptor(number, path_id, file_size);
   new_files_.push_back(std::make_pair(level, f));
@@ -373,8 +391,8 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
         uint64_t file_size;
         if (GetLevel(&input, &level, &msg) && GetVarint64(&input, &number) &&
             GetVarint64(&input, &file_size) &&
-            GetInternalKey(&input, &f.smallest) &&
-            GetInternalKey(&input, &f.largest)) {
+            GetInternalKey(&input, &f.smallest()) &&
+            GetInternalKey(&input, &f.largest())) {
           f.fd = FileDescriptor(number, 0, file_size);
           new_files_.push_back(std::make_pair(level, f));
         } else {
@@ -389,8 +407,8 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
         uint64_t file_size;
         if (GetLevel(&input, &level, &msg) && GetVarint64(&input, &number) &&
             GetVarint64(&input, &file_size) &&
-            GetInternalKey(&input, &f.smallest) &&
-            GetInternalKey(&input, &f.largest) &&
+            GetInternalKey(&input, &f.smallest()) &&
+            GetInternalKey(&input, &f.largest()) &&
             GetVarint64(&input, &f.smallest_seqno) &&
             GetVarint64(&input, &f.largest_seqno)) {
           f.fd = FileDescriptor(number, 0, file_size);
@@ -409,8 +427,8 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
         uint64_t file_size;
         if (GetLevel(&input, &level, &msg) && GetVarint64(&input, &number) &&
             GetVarint32(&input, &path_id) && GetVarint64(&input, &file_size) &&
-            GetInternalKey(&input, &f.smallest) &&
-            GetInternalKey(&input, &f.largest) &&
+            GetInternalKey(&input, &f.smallest()) &&
+            GetInternalKey(&input, &f.largest()) &&
             GetVarint64(&input, &f.smallest_seqno) &&
             GetVarint64(&input, &f.largest_seqno)) {
           f.fd = FileDescriptor(number, path_id, file_size);
@@ -508,9 +526,9 @@ std::string VersionEdit::DebugString(bool hex_key) const {
     r.append(" ");
     AppendNumberTo(&r, f.fd.GetFileSize());
     r.append(" ");
-    r.append(f.smallest.DebugString(hex_key));
+    r.append(f.smallest().DebugString(hex_key));
     r.append(" .. ");
-    r.append(f.largest.DebugString(hex_key));
+    r.append(f.largest().DebugString(hex_key));
   }
   r.append("\n  ColumnFamily: ");
   AppendNumberTo(&r, column_family_);
@@ -575,8 +593,8 @@ std::string VersionEdit::DebugJSON(int edit_num, bool hex_key) const {
       const FileMetaData& f = new_files_[i].second;
       jw << "FileNumber" << f.fd.GetNumber();
       jw << "FileSize" << f.fd.GetFileSize();
-      jw << "SmallestIKey" << f.smallest.DebugString(hex_key);
-      jw << "LargestIKey" << f.largest.DebugString(hex_key);
+      jw << "SmallestIKey" << f.smallest().DebugString(hex_key);
+      jw << "LargestIKey" << f.largest().DebugString(hex_key);
       jw.EndArrayedObject();
     }
 

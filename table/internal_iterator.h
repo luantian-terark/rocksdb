@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "rocksdb/comparator.h"
 #include "rocksdb/iterator.h"
 #include "rocksdb/status.h"
@@ -117,7 +118,7 @@ class InternalIterator : public Cleanable {
 extern InternalIterator* NewRangeWrappedInternalIterator(
   InternalIterator* iter,
   const InternalKeyComparator& internal_key_comp,
-  const InternalKey& smallest, const InternalKey& largest);
+  const std::vector<InternalKey>& range_set);
 
 // Return an empty iterator (yields nothing).
 extern InternalIterator* NewEmptyInternalIterator();

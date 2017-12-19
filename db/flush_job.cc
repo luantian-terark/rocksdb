@@ -353,7 +353,7 @@ Status FlushJob::WriteLevel0Table() {
     // that key range.
     // Add file to L0
     edit_->AddFile(0 /* level */, meta_.fd.GetNumber(), meta_.fd.GetPathId(),
-                   meta_.fd.GetFileSize(), meta_.smallest, meta_.largest,
+                   meta_.fd.GetFileSize(), meta_.range_set,
                    meta_.smallest_seqno, meta_.largest_seqno,
                    meta_.marked_for_compaction, meta_.partial_removed);
   }

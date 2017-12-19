@@ -233,7 +233,7 @@ InternalIterator* TableCache::NewIterator(
       result = table_reader->NewIterator(options, arena, skip_filters);
       if (meta.partial_removed) {
         InternalIterator* wrapper = NewRangeWrappedInternalIterator(
-          result, icomparator, meta.smallest, meta.largest);
+          result, icomparator, meta.range_set);
         wrapper->RegisterCleanup([](void* arg1, void* arg2) {
           auto iter = reinterpret_cast<InternalIterator*>(arg1);
           if (arg2) {
@@ -321,9 +321,13 @@ InternalIterator* TableCache::NewRangeTombstoneIterator(
 
 Status TableCache::Get(const ReadOptions& options,
                        const InternalKeyComparator& internal_comparator,
-                       const FileDescriptor& fd, const Slice& k,
+                       const FileMetaData& meta, const Slice& k,
                        GetContext* get_context, HistogramImpl* file_read_hist,
                        bool skip_filters, int level) {
+  const FileDescriptor& fd = meta.fd;
+  assert(internal_comparator.Compare(k, meta.smallest().Encode()) >= 0);
+  assert(internal_comparator.Compare(k, meta.largest().Encode()) <= 0);
+
   std::string* row_cache_entry = nullptr;
   bool done = false;
 #ifndef ROCKSDB_LITE

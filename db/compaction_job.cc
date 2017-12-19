@@ -70,11 +70,20 @@ struct PartialRemoveInfo {
 };
 struct PartialRemoveMetaData {
   FileMetaData* file = nullptr;
-  InternalKey smallest;
-  InternalKey largest;
+  std::vector<InternalKey> range_set;
   uint64_t sst_size = 0;
   uint64_t partial_removed = 0;
   unique_ptr<InternalIterator> iter;
+
+  InternalKey& smallest() { return range_set.front(); }
+  const InternalKey& smallest() const { return range_set.front(); }
+
+  InternalKey& largest() { return range_set.back(); }
+  const InternalKey& largest() const { return range_set.back(); }
+
+  PartialRemoveMetaData() {
+    range_set.resize(2);
+  }
 
   // for FindLevelOverlap
   const PartialRemoveMetaData* operator->() const {
@@ -90,11 +99,11 @@ std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
   const InternalKey& largest) {
   auto left = std::lower_bound(files.begin(), files.end(), smallest,
     [&ic](const meta& l, const InternalKey& r) {
-    return ic.Compare(l->largest, r) < 0;
+    return ic.Compare(l->largest(), r) < 0;
   });
   auto right = std::lower_bound(files.rbegin(), files.rend(), largest,
     [&ic](const meta& l, const InternalKey& r) {
-    return ic.Compare(l->smallest, r) > 0;
+    return ic.Compare(l->smallest(), r) > 0;
   });
   return std::make_pair(left - files.begin(), files.rend() - right - 1);
 }
@@ -212,15 +221,15 @@ struct CompactionJob::SubcompactionState {
     // Scan to find earliest grandparent file that contains key.
     while (grandparent_index < grandparents.size() &&
            icmp->Compare(internal_key,
-                         grandparents[grandparent_index]->largest.Encode()) >
+                         grandparents[grandparent_index]->largest().Encode()) >
                0) {
       if (seen_key) {
         overlapped_bytes += grandparents[grandparent_index]->fd.GetFileSize();
       }
       assert(grandparent_index + 1 >= grandparents.size() ||
              icmp->Compare(
-                 grandparents[grandparent_index]->largest.Encode(),
-                 grandparents[grandparent_index + 1]->smallest.Encode()) <= 0);
+                 grandparents[grandparent_index]->largest().Encode(),
+                 grandparents[grandparent_index + 1]->smallest().Encode()) <= 0);
       grandparent_index++;
     }
     seen_key = true;
@@ -267,7 +276,7 @@ struct CompactionJob::CompactionState {
     for (const auto& sub_compact_state : sub_compact_states) {
       if (!sub_compact_state.outputs.empty() &&
           sub_compact_state.outputs[0].finished) {
-        return sub_compact_state.outputs[0].meta.smallest.user_key();
+        return sub_compact_state.outputs[0].meta.smallest().user_key();
       }
     }
     // If there is no finished output, return an empty slice.
@@ -279,7 +288,7 @@ struct CompactionJob::CompactionState {
          ++it) {
       if (!it->outputs.empty() && it->current_output()->finished) {
         assert(it->current_output() != nullptr);
-        return it->current_output()->meta.largest.user_key();
+        return it->current_output()->meta.largest().user_key();
       }
     }
     // If there is no finished output, return an empty slice.
@@ -1118,11 +1127,11 @@ Status CompactionJob::FinishCompactionOutputFile(
       // For the first output table, include range tombstones before the min key
       // but after the subcompaction boundary.
       lower_bound = sub_compact->start;
-    } else if (meta->smallest.size() > 0) {
+    } else if (meta->smallest().size() > 0) {
       // For subsequent output tables, only include range tombstones from min
       // key onwards since the previous file was extended to contain range
       // tombstones falling before min key.
-      smallest_user_key = meta->smallest.user_key().ToString(false /*hex*/);
+      smallest_user_key = meta->smallest().user_key().ToString(false /*hex*/);
       lower_bound_guard = Slice(smallest_user_key);
       lower_bound = &lower_bound_guard;
     } else {
@@ -1298,8 +1307,8 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
     // partial remove is ok if overlap.first < overlap.second
     if (overlap.first == overlap.second) {
       auto file = it->files[overlap.first];
-      if (ic.Compare(smallest, file->smallest) > 0
-        && ic.Compare(largest, file->largest) < 0) {
+      if (ic.Compare(smallest, file->smallest()) > 0
+        && ic.Compare(largest, file->largest()) < 0) {
         // output sst can't partial remove in middle ...
         return false;
       }
@@ -1310,12 +1319,12 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
     if (level.level == 0) {
       // each level 0 sst need check
       for (auto& file : level.files) {
-        if (ic.Compare(smallest, file->smallest) <= 0
-          && ic.Compare(largest, file->largest) >= 0) {
+        if (ic.Compare(smallest, file->smallest()) <= 0
+          && ic.Compare(largest, file->largest()) >= 0) {
           can_partial_remove = true;
         }
-        else if (ic.Compare(smallest, file->smallest) > 0
-          && ic.Compare(largest, file->largest) < 0) {
+        else if (ic.Compare(smallest, file->smallest()) > 0
+          && ic.Compare(largest, file->largest()) < 0) {
           // in middle ...
           return false;
         }
@@ -1330,16 +1339,16 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
         continue;
       }
       if (overlap.first == overlap.second
-        && ic.Compare(smallest, level.files[overlap.first]->smallest) > 0
-        && ic.Compare(largest, level.files[overlap.second]->largest) < 0) {
+        && ic.Compare(smallest, level.files[overlap.first]->smallest()) > 0
+        && ic.Compare(largest, level.files[overlap.second]->largest()) < 0) {
         // in middle ...
         return false;
       }
-      if (ic.Compare(level.files[overlap.first]->smallest, smallest) < 0) {
+      if (ic.Compare(level.files[overlap.first]->smallest(), smallest) < 0) {
         // can't cover left
         ++overlap.first;
       }
-      if (ic.Compare(level.files[overlap.second]->largest, largest) > 0) {
+      if (ic.Compare(level.files[overlap.second]->largest(), largest) > 0) {
         // can't cover right
         --overlap.second;
       }
@@ -1392,8 +1401,8 @@ Status CompactionJob::InstallCompactionResults(
       for (auto& file : level.files) {
         PartialRemoveMetaData meta;
         meta.file = file;
-        meta.smallest = file->smallest;
-        meta.largest = file->largest;
+        meta.smallest() = file->smallest();
+        meta.largest() = file->largest();
         meta.partial_removed = file->partial_removed;
         level_pick.emplace_back(std::move(meta));
       }
@@ -1410,7 +1419,7 @@ Status CompactionJob::InstallCompactionResults(
         meta->iter.reset(table_reader->NewIterator(ReadOptions()));
       }
       auto iter = meta->iter.get();
-      if (ic.Compare(largest, meta->smallest) >= 0) {
+      if (ic.Compare(largest, meta->smallest()) >= 0) {
         iter->Seek(largest.Encode());
         if (!iter->Valid()) {
           return false;
@@ -1421,11 +1430,11 @@ Status CompactionJob::InstallCompactionResults(
         if (!iter->Valid()) {
           return false;
         }
-        assert(ic.Compare(iter->key(), meta->smallest.Encode()) > 0);
-        meta->smallest.DecodeFrom(iter->key());
+        assert(ic.Compare(iter->key(), meta->smallest().Encode()) > 0);
+        meta->smallest().DecodeFrom(iter->key());
       }
       else {
-        assert(ic.Compare(smallest, meta->largest) <= 0);
+        assert(ic.Compare(smallest, meta->largest()) <= 0);
         iter->SeekForPrev(smallest.Encode());
         if (!iter->Valid()) {
           return false;
@@ -1436,10 +1445,10 @@ Status CompactionJob::InstallCompactionResults(
         if (!iter->Valid()) {
           return false;
         }
-        assert(ic.Compare(iter->key(), meta->largest.Encode()) < 0);
-        meta->largest.DecodeFrom(iter->key());
+        assert(ic.Compare(iter->key(), meta->largest().Encode()) < 0);
+        meta->largest().DecodeFrom(iter->key());
       }
-      if (ic.Compare(meta->smallest, meta->largest) > 0) {
+      if (ic.Compare(meta->smallest(), meta->largest()) > 0) {
         return false;
       }
       if (meta->sst_size == 0) {
@@ -1448,9 +1457,9 @@ Status CompactionJob::InstallCompactionResults(
           table_reader->ApproximateOffsetOf(iter->key()));
       }
       uint64_t smallest_offset =
-        table_reader->ApproximateOffsetOf(meta->smallest.Encode());
+        table_reader->ApproximateOffsetOf(meta->smallest().Encode());
       uint64_t largest_offset =
-        table_reader->ApproximateOffsetOf(meta->largest.Encode());
+        table_reader->ApproximateOffsetOf(meta->largest().Encode());
       meta->partial_removed = std::max<uint64_t>(1,
         (meta->sst_size - largest_offset + smallest_offset) * 100 / meta->sst_size);
       return true;
@@ -1463,13 +1472,13 @@ Status CompactionJob::InstallCompactionResults(
         if (level.first == 0) {
           // each level 0 sst need check
           for (auto& file : level.second) {
-            if (ic.Compare(smallest, file->smallest) <= 0
-              && ic.Compare(largest, file->largest) >= 0) {
+            if (ic.Compare(smallest, file->smallest()) <= 0
+              && ic.Compare(largest, file->largest()) >= 0) {
               // ok , whole sst removed
               continue;
             }
-            assert(ic.Compare(smallest, file->smallest) <= 0
-              || ic.Compare(largest, file->largest) >= 0);
+            assert(ic.Compare(smallest, file->smallest()) <= 0
+              || ic.Compare(largest, file->largest()) >= 0);
             if (trim_meta_data(&file, smallest, largest)) {
               new_level.emplace_back(std::move(file));
             }
@@ -1507,7 +1516,7 @@ Status CompactionJob::InstallCompactionResults(
       for (auto& file : level.second) {
         compaction->edit()->AddFile(level.first, file.file->fd.GetNumber(),
           file.file->fd.GetPathId(), file.file->fd.GetFileSize(),
-          file.smallest, file.largest,
+          { file.smallest(), file.largest() },
           file.file->smallest_seqno, file.file->largest_seqno,
           file.partial_removed > 0, static_cast<uint8_t>(file.partial_removed));
       }

@@ -934,7 +934,7 @@ Status DBImpl::WriteLevel0TableForRecovery(int job_id, ColumnFamilyData* cfd,
   int level = 0;
   if (s.ok() && meta.fd.GetFileSize() > 0) {
     edit->AddFile(level, meta.fd.GetNumber(), meta.fd.GetPathId(),
-                  meta.fd.GetFileSize(), meta.smallest, meta.largest,
+                  meta.fd.GetFileSize(), meta.range_set,
                   meta.smallest_seqno, meta.largest_seqno,
                   meta.marked_for_compaction, meta.partial_removed);
   }

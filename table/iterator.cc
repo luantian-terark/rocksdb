@@ -19,14 +19,14 @@ class RangeWrappedInternalIterator : public InternalIterator {
 public:
   RangeWrappedInternalIterator(InternalIterator* iter,
     const InternalKeyComparator& internal_key_comp,
-    const InternalKey& smallest, const InternalKey& largest)
+    const std::vector<InternalKey>& range_set)
     : iter_(iter)
     , ic_(internal_key_comp)
-    , smallest_(smallest)
-    , largest_(largest)
+    , smallest_(range_set.front())
+    , largest_(range_set.back())
     , invalid_(false) {
     assert(iter_);
-    assert(ic_.Compare(smallest, largest) <= 0);
+    assert(ic_.Compare(smallest_, largest_) <= 0);
   }
 
   bool Valid() const override final {
@@ -47,7 +47,7 @@ public:
     }
     else {
       iter_->Seek(target);
-      if (ic_.Compare(iter_->key(), largest_.Encode()) > 0) {
+      if (!iter_->Valid() || ic_.Compare(iter_->key(), largest_.Encode()) > 0) {
         invalid_ = true;
       }
     }
@@ -59,7 +59,7 @@ public:
     }
     else {
       iter_->SeekForPrev(target);
-      if (ic_.Compare(target, smallest_.Encode()) < 0) {
+      if (!iter_->Valid() || ic_.Compare(target, smallest_.Encode()) < 0) {
         invalid_ = true;
       }
     }
@@ -67,14 +67,14 @@ public:
   void Next() override final {
     assert(!invalid_);
     iter_->Next();
-    if (ic_.Compare(iter_->key(), largest_.Encode()) >= 0) {
+    if (iter_->Valid() && ic_.Compare(iter_->key(), largest_.Encode()) >= 0) {
       invalid_ = true;
     }
   }
   void Prev() override final {
     assert(!invalid_);
     iter_->Prev();
-    if (ic_.Compare(iter_->key(), smallest_.Encode()) <= 0) {
+    if (iter_->Valid() && ic_.Compare(iter_->key(), smallest_.Encode()) <= 0) {
       invalid_ = true;
     }
   }
@@ -87,9 +87,6 @@ public:
     return iter_->value();
   }
   Status status() const override final {
-    if (invalid_) {
-      return Status::Corruption("Out of range");
-    }
     return iter_->status();
   }
   void SetPinnedItersMgr(PinnedIteratorsManager* pinned_iters_mgr) override final {
@@ -266,8 +263,8 @@ Iterator* NewErrorIterator(const Status& status) {
 InternalIterator* NewRangeWrappedInternalIterator(
   InternalIterator* iter,
   const InternalKeyComparator& ic,
-  const InternalKey& smallest, const InternalKey& largest) {
-  return new RangeWrappedInternalIterator(iter, ic, smallest, largest);
+  const std::vector<InternalKey>& range_set) {
+  return new RangeWrappedInternalIterator(iter, ic, range_set);
 }
 
 InternalIterator* NewEmptyInternalIterator() {
