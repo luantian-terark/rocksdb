@@ -1395,6 +1395,7 @@ Status CompactionJob::InstallCompactionResults(
         update.file = file;
         update.smallest = file->smallest;
         update.largest = file->largest;
+        update.partial_removed = file->partial_removed;
         level_pick.emplace_back(std::move(update));
       }
       inputs_pick.emplace_back(level.level, std::move(level_pick));

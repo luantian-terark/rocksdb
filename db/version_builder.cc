@@ -352,9 +352,12 @@ class VersionBuilder::Rep {
         // Add all smaller files listed in base_
         for (auto bpos = std::upper_bound(base_iter, base_end, added, cmp);
              base_iter != bpos; ++base_iter) {
-          if ((*base_iter)->fd.GetNumber() == added->fd.GetNumber()) {
-            ++base_iter;
-            break;
+          //TODO ugly
+          if (std::find_if(added_files.begin(), added_files.end(),
+            [&base_iter](FileMetaData* meta) {
+            return meta->fd.GetNumber() == (*base_iter)->fd.GetNumber();
+          }) != added_files.end()) {
+            continue;
           }
           MaybeAddFile(vstorage, level, *base_iter);
         }
