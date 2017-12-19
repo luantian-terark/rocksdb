@@ -977,7 +977,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
           sub_compact->compression_dict = std::move(dict_sample_data);
         }
       }
-      if (next_key && ShouldFinishCompaction(sub_compact, *next_key)) {
+      if (sub_compact->compaction->immutable_cf_options()->enable_partial_remove
+        && next_key && ShouldFinishCompaction(sub_compact, *next_key)) {
         sub_compact->partial_remove_info.active = true;
         break;
       }

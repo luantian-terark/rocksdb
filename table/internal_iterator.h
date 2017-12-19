@@ -115,10 +115,12 @@ class InternalIterator : public Cleanable {
   InternalIterator& operator=(const InternalIterator&) = delete;
 };
 
+// Return an range wrapped InternalIterator
+// range_set not owned
 extern InternalIterator* NewRangeWrappedInternalIterator(
   InternalIterator* iter,
   const InternalKeyComparator& internal_key_comp,
-  const std::vector<InternalKey>& range_set);
+  const std::vector<InternalKey>* range_set);
 
 // Return an empty iterator (yields nothing).
 extern InternalIterator* NewEmptyInternalIterator();

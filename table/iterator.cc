@@ -19,63 +19,134 @@ class RangeWrappedInternalIterator : public InternalIterator {
 public:
   RangeWrappedInternalIterator(InternalIterator* iter,
     const InternalKeyComparator& internal_key_comp,
-    const std::vector<InternalKey>& range_set)
+    const std::vector<InternalKey>* range_set)
     : iter_(iter)
     , ic_(internal_key_comp)
-    , smallest_(range_set.front())
-    , largest_(range_set.back())
+    , range_set_(range_set)
+    , smallest_(nullptr)
+    , largest_(nullptr)
     , invalid_(false) {
     assert(iter_);
-    assert(ic_.Compare(smallest_, largest_) <= 0);
+    assert(range_set_->size() >= 2);
   }
 
   bool Valid() const override final {
     return !invalid_ && iter_->Valid();
   }
   void SeekToFirst() override final {
+    smallest_ = &range_set_->front();
+    largest_ = smallest_ + 1;
     invalid_ = false;
-    iter_->Seek(smallest_.Encode());
+    iter_->Seek(smallest_->Encode());
   }
   void SeekToLast() override final {
+    largest_ = &range_set_->back();
+    smallest_ = largest_ - 1;
     invalid_ = false;
-    iter_->SeekForPrev(largest_.Encode());
+    iter_->SeekForPrev(largest_->Encode());
   }
   void Seek(const Slice& target) override final {
-    invalid_ = false;
-    if (ic_.Compare(target, smallest_.Encode()) <= 0) {
-      iter_->Seek(smallest_.Encode());
-    }
-    else {
-      iter_->Seek(target);
-      if (!iter_->Valid() || ic_.Compare(iter_->key(), largest_.Encode()) > 0) {
-        invalid_ = true;
+    Slice s = target;
+    while(true) {
+      iter_->Seek(s);
+      if (!iter_->Valid()) {
+        break;
       }
+      auto find = std::upper_bound(range_set_->begin(), range_set_->end(),
+        iter_->key(), [this](const Slice& l, const InternalKey& r) {
+        return ic_.Compare(l, r.Encode()) < 0;
+      });
+      if ((find - range_set_->begin()) % 2 == 1) {
+        largest_ = &*find;
+        smallest_ = largest_ - 1;
+        invalid_ = false;
+        break;
+      }
+      if (find == range_set_->begin()) {
+        SeekToFirst();
+        break;
+      }
+      largest_ = &*(find - 1);
+      if (ic_.Compare(iter_->key(), largest_->Encode()) == 0) {
+        smallest_ = largest_ - 1;
+        invalid_ = false;
+        break;
+      }
+      if (find == range_set_->end()) {
+        invalid_ = true;
+        break;
+      }
+      s = (largest_ + 1)->Encode();
     }
+    assert(!Valid() || ((smallest_ - range_set_->data()) % 2 == 0
+      && (largest_ - range_set_->data()) % 2 == 1));
+    assert(!Valid() || (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0
+      && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
   }
   void SeekForPrev(const Slice& target) override final {
-    invalid_ = false;
-    if (ic_.Compare(target, largest_.Encode()) >= 0) {
-      iter_->SeekForPrev(largest_.Encode());
-    }
-    else {
-      iter_->SeekForPrev(target);
-      if (!iter_->Valid() || ic_.Compare(target, smallest_.Encode()) < 0) {
-        invalid_ = true;
+    Slice s = target;
+    while (true) {
+      iter_->SeekForPrev(s);
+      if (!iter_->Valid()) {
+        break;
       }
+      auto find = std::upper_bound(range_set_->rbegin(), range_set_->rend(),
+        iter_->key(), [this](const Slice& l, const InternalKey& r) {
+        return ic_.Compare(l, r.Encode()) > 0;
+      });
+      if ((find - range_set_->rbegin()) % 2 == 1) {
+        smallest_ = &*find;
+        largest_ = smallest_ + 1;
+        invalid_ = false;
+        break;
+      }
+      if (find == range_set_->rbegin()) {
+        SeekToLast();
+        break;
+      }
+      smallest_ = &*(find - 1);
+      if (ic_.Compare(iter_->key(), smallest_->Encode()) == 0) {
+        largest_ = smallest_ + 1;
+        invalid_ = false;
+        break;
+      }
+      if (find == range_set_->rend()) {
+        invalid_ = true;
+        break;
+      }
+      s = (smallest_ - 1)->Encode();
     }
+    assert(!Valid() || ((smallest_ - range_set_->data()) % 2 == 0
+      && (largest_ - range_set_->data()) % 2 == 1));
+    assert(!Valid() || (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0
+      && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
   }
   void Next() override final {
     assert(!invalid_);
     iter_->Next();
-    if (iter_->Valid() && ic_.Compare(iter_->key(), largest_.Encode()) >= 0) {
-      invalid_ = true;
+    if (iter_->Valid() && ic_.Compare(iter_->key(), largest_->Encode()) >= 0) {
+      if (largest_ == &range_set_->back()) {
+        invalid_ = true;
+      }
+      else {
+        smallest_ += 2;
+        largest_ += 2;
+        iter_->Seek(smallest_->Encode());
+      }
     }
   }
   void Prev() override final {
     assert(!invalid_);
     iter_->Prev();
-    if (iter_->Valid() && ic_.Compare(iter_->key(), smallest_.Encode()) <= 0) {
-      invalid_ = true;
+    if (iter_->Valid() && ic_.Compare(iter_->key(), smallest_->Encode()) <= 0) {
+      if (smallest_ == &range_set_->front()) {
+        invalid_ = true;
+      }
+      else {
+        largest_ += 2;
+        smallest_ += 2;
+        iter_->SeekForPrev(largest_->Encode());
+      }
     }
   }
   Slice key() const override final {
@@ -105,8 +176,9 @@ public:
 private:
   InternalIterator * iter_;
   const InternalKeyComparator& ic_;
-  InternalKey smallest_;
-  InternalKey largest_;
+  const std::vector<InternalKey>* range_set_;
+  const InternalKey* smallest_;
+  const InternalKey* largest_;
   bool invalid_;
 };
 
@@ -263,7 +335,7 @@ Iterator* NewErrorIterator(const Status& status) {
 InternalIterator* NewRangeWrappedInternalIterator(
   InternalIterator* iter,
   const InternalKeyComparator& ic,
-  const std::vector<InternalKey>& range_set) {
+  const std::vector<InternalKey>* range_set) {
   return new RangeWrappedInternalIterator(iter, ic, range_set);
 }
 

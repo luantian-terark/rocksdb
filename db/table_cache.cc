@@ -233,7 +233,7 @@ InternalIterator* TableCache::NewIterator(
       result = table_reader->NewIterator(options, arena, skip_filters);
       if (meta.partial_removed) {
         InternalIterator* wrapper = NewRangeWrappedInternalIterator(
-          result, icomparator, meta.range_set);
+          result, icomparator, &meta.range_set);
         wrapper->RegisterCleanup([](void* arg1, void* arg2) {
           auto iter = reinterpret_cast<InternalIterator*>(arg1);
           if (arg2) {
