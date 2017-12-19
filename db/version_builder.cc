@@ -335,7 +335,7 @@ class VersionBuilder::Rep {
 
       // Merge base files and added files for the level.
       std::vector<FileMetaData*> added_files;
-      added_files.reserve(base_files.size() + unordered_added_files.size());
+      added_files.reserve(base_files.size() + add_files_size);
       for (const auto& pair : unordered_added_files) {
         added_files.push_back(pair.second);
       }

@@ -68,7 +68,7 @@ struct PartialRemoveInfo {
   InternalKey largest;
   bool active = false;
 };
-struct PartialRemoveUpdate {
+struct PartialRemoveMetaData {
   FileMetaData* file = nullptr;
   InternalKey smallest;
   InternalKey largest;
@@ -77,7 +77,7 @@ struct PartialRemoveUpdate {
   unique_ptr<InternalIterator> iter;
 
   // for FindLevelOverlap
-  const PartialRemoveUpdate* operator->() const {
+  const PartialRemoveMetaData* operator->() const {
     return this;
   }
 };
@@ -1386,11 +1386,11 @@ Status CompactionJob::InstallCompactionResults(
     auto inputs = *compaction->inputs();  // deep copy
     auto& ic = compaction->column_family_data()->internal_comparator();
 
-    std::vector<std::pair<int, std::vector<PartialRemoveUpdate>>> inputs_pick;
+    std::vector<std::pair<int, std::vector<PartialRemoveMetaData>>> inputs_pick;
     for (auto& level : inputs) {
-      std::vector<PartialRemoveUpdate> level_pick;
+      std::vector<PartialRemoveMetaData> level_pick;
       for (auto& file : level.files) {
-        PartialRemoveUpdate update;
+        PartialRemoveMetaData update;
         update.file = file;
         update.smallest = file->smallest;
         update.largest = file->largest;
@@ -1400,15 +1400,15 @@ Status CompactionJob::InstallCompactionResults(
       inputs_pick.emplace_back(level.level, std::move(level_pick));
     }
 
-    auto trim_meta_data = [&ic, compaction](PartialRemoveUpdate* update,
+    auto trim_meta_data = [&ic, compaction](PartialRemoveMetaData* meta,
       const InternalKey& smallest,
       const InternalKey& largest) {
 
-      if (!update->iter) {
-        update->iter.reset(update->file->fd.table_reader->NewIterator(ReadOptions()));
+      if (!meta->iter) {
+        meta->iter.reset(meta->file->fd.table_reader->NewIterator(ReadOptions()));
       }
-      auto iter = update->iter.get();
-      if (ic.Compare(largest, update->smallest) >= 0) {
+      auto iter = meta->iter.get();
+      if (ic.Compare(largest, meta->smallest) >= 0) {
         iter->Seek(largest.Encode());
         if (!iter->Valid()) {
           return false;
@@ -1419,11 +1419,11 @@ Status CompactionJob::InstallCompactionResults(
         if (!iter->Valid()) {
           return false;
         }
-        assert(ic.Compare(iter->key(), update->smallest.Encode()) > 0);
-        update->smallest.DecodeFrom(iter->key());
+        assert(ic.Compare(iter->key(), meta->smallest.Encode()) > 0);
+        meta->smallest.DecodeFrom(iter->key());
       }
       else {
-        assert(ic.Compare(smallest, update->largest) <= 0);
+        assert(ic.Compare(smallest, meta->largest) <= 0);
         iter->SeekForPrev(smallest.Encode());
         if (!iter->Valid()) {
           return false;
@@ -1434,30 +1434,32 @@ Status CompactionJob::InstallCompactionResults(
         if (!iter->Valid()) {
           return false;
         }
-        assert(ic.Compare(iter->key(), update->largest.Encode()) < 0);
-        update->largest.DecodeFrom(iter->key());
+        assert(ic.Compare(iter->key(), meta->largest.Encode()) < 0);
+        meta->largest.DecodeFrom(iter->key());
       }
-      if (ic.Compare(update->smallest, update->largest) > 0) {
+      if (ic.Compare(meta->smallest, meta->largest) > 0) {
         return false;
       }
-      if (update->sst_size == 0) {
+      auto table_reader = meta->file->fd.table_reader;
+      assert(table_reader);
+      if (meta->sst_size == 0) {
         iter->SeekToLast();
-        update->sst_size = std::max<uint64_t>(1,
-          update->file->fd.table_reader->ApproximateOffsetOf(iter->key()));
+        meta->sst_size = std::max<uint64_t>(1,
+          table_reader->ApproximateOffsetOf(iter->key()));
       }
       uint64_t smallest_offset =
-        update->file->fd.table_reader->ApproximateOffsetOf(update->smallest.Encode());
+        table_reader->ApproximateOffsetOf(meta->smallest.Encode());
       uint64_t largest_offset =
-        update->file->fd.table_reader->ApproximateOffsetOf(update->largest.Encode());
-      update->partial_removed = std::max<uint64_t>(1,
-        (update->sst_size - largest_offset + smallest_offset) * 100 / update->sst_size);
+        table_reader->ApproximateOffsetOf(meta->largest.Encode());
+      meta->partial_removed = std::max<uint64_t>(1,
+        (meta->sst_size - largest_offset + smallest_offset) * 100 / meta->sst_size);
       return true;
     };
     for (const auto& sub_compact : compact_->sub_compact_states) {
       auto& smallest = sub_compact.partial_remove_info.smallest;
       auto& largest = sub_compact.partial_remove_info.largest;
       for (auto& level : inputs_pick) {
-        std::vector<PartialRemoveUpdate> new_level;
+        std::vector<PartialRemoveMetaData> new_level;
         if (level.first == 0) {
           // each level 0 sst need check
           for (auto& file : level.second) {
