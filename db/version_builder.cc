@@ -79,6 +79,11 @@ class VersionBuilder::Rep {
       return false;
     }
   };
+  struct FileNumberComparator {
+    bool operator()(FileMetaData* f1, FileMetaData* f2) const {
+      return f1->fd.GetNumber() < f2->fd.GetNumber();
+    }
+  };
 
   struct LevelState {
     std::unordered_set<uint64_t> deleted_files;
@@ -102,6 +107,7 @@ class VersionBuilder::Rep {
   bool has_invalid_levels_;
   FileComparator level_zero_cmp_;
   FileComparator level_nonzero_cmp_;
+  FileNumberComparator file_num_cmp_;
 
  public:
   Rep(const EnvOptions& env_options, Logger* info_log, TableCache* table_cache,
@@ -322,19 +328,35 @@ class VersionBuilder::Rep {
       // Merge the set of added files with the set of pre-existing files.
       // Drop any deleted files.  Store the result in *v.
       const auto& base_files = base_vstorage_->LevelFiles(level);
-      auto base_iter = base_files.begin();
-      auto base_end = base_files.end();
       const auto& unordered_added_files = levels_[level].added_files;
+      const size_t add_files_size = unordered_added_files.size();
       vstorage->Reserve(level,
-                        base_files.size() + unordered_added_files.size());
+                        base_files.size() + add_files_size);
 
-      // Sort added files for the level.
+      // Merge base files and added files for the level.
       std::vector<FileMetaData*> added_files;
-      added_files.reserve(unordered_added_files.size());
+      added_files.reserve(base_files.size() + unordered_added_files.size());
       for (const auto& pair : unordered_added_files) {
         added_files.push_back(pair.second);
       }
-      std::sort(added_files.begin(), added_files.end(), cmp);
+      added_files.insert(added_files.end(),
+        base_files.begin(), base_files.end());
+      if (add_files_size > 0) {
+        if (!base_files.empty()) {
+          // first sort added files with file num
+          std::sort(added_files.begin(), added_files.begin() + add_files_size,
+            file_num_cmp_);
+          // then remove base files
+          added_files.erase(std::remove_if(
+            added_files.begin() + add_files_size, added_files.end(),
+            [this, &added_files, add_files_size](FileMetaData* meta) {
+            return std::binary_search(added_files.begin(),
+              added_files.begin() + add_files_size,
+              meta, file_num_cmp_);
+          }), added_files.end());
+        }
+        std::sort(added_files.begin(), added_files.end(), cmp);
+      }
 
 #ifndef NDEBUG
       FileMetaData* prev_file = nullptr;
@@ -348,26 +370,7 @@ class VersionBuilder::Rep {
         }
         prev_file = added;
 #endif
-
-        // Add all smaller files listed in base_
-        for (auto bpos = std::upper_bound(base_iter, base_end, added, cmp);
-             base_iter != bpos; ++base_iter) {
-          //TODO ugly
-          if (std::find_if(added_files.begin(), added_files.end(),
-            [&base_iter](FileMetaData* meta) {
-            return meta->fd.GetNumber() == (*base_iter)->fd.GetNumber();
-          }) != added_files.end()) {
-            continue;
-          }
-          MaybeAddFile(vstorage, level, *base_iter);
-        }
-
         MaybeAddFile(vstorage, level, added);
-      }
-
-      // Add remaining base files
-      for (; base_iter != base_end; ++base_iter) {
-        MaybeAddFile(vstorage, level, *base_iter);
       }
     }
 
