@@ -1218,45 +1218,44 @@ Status CompactionJob::FinishCompactionOutputFile(
                      " keys, %" PRIu64 " bytes%s",
                      cfd->GetName().c_str(), job_id_, output_number,
                      current_entries, current_bytes,
-meta->marked_for_compaction ? " (need compaction)" : "");
+                     meta->marked_for_compaction ? " (need compaction)" : "");
     }
   }
   std::string fname;
   FileDescriptor output_fd;
   if (meta != nullptr) {
     fname = TableFileName(db_options_.db_paths, meta->fd.GetNumber(),
-      meta->fd.GetPathId());
+                          meta->fd.GetPathId());
     output_fd = meta->fd;
-  }
-  else {
+  } else {
     fname = "(nil)";
   }
   EventHelpers::LogAndNotifyTableFileCreationFinished(
-    event_logger_, cfd->ioptions()->listeners, dbname_, cfd->GetName(), fname,
-    job_id_, output_fd, tp, TableFileCreationReason::kCompaction, s);
+      event_logger_, cfd->ioptions()->listeners, dbname_, cfd->GetName(), fname,
+      job_id_, output_fd, tp, TableFileCreationReason::kCompaction, s);
 
 #ifndef ROCKSDB_LITE
   // Report new file to SstFileManagerImpl
   auto sfm =
-    static_cast<SstFileManagerImpl*>(db_options_.sst_file_manager.get());
+      static_cast<SstFileManagerImpl*>(db_options_.sst_file_manager.get());
   if (sfm && meta != nullptr && meta->fd.GetPathId() == 0) {
     auto fn = TableFileName(cfd->ioptions()->db_paths, meta->fd.GetNumber(),
-      meta->fd.GetPathId());
+                            meta->fd.GetPathId());
     sfm->OnAddFile(fn);
     if (sfm->IsMaxAllowedSpaceReached()) {
       // TODO(ajkr): should we return OK() if max space was reached by the final
       // compaction output file (similarly to how flush works when full)?
       s = Status::IOError("Max allowed space was reached");
       TEST_SYNC_POINT(
-        "CompactionJob::FinishCompactionOutputFile:"
-        "MaxAllowedSpaceReached");
+          "CompactionJob::FinishCompactionOutputFile:"
+          "MaxAllowedSpaceReached");
       InstrumentedMutexLock l(db_mutex_);
       if (db_bg_error_->ok()) {
         Status new_bg_error = s;
         // may temporarily unlock and lock the mutex.
         EventHelpers::NotifyOnBackgroundError(
-          cfd->ioptions()->listeners, BackgroundErrorReason::kCompaction,
-          &new_bg_error, db_mutex_);
+            cfd->ioptions()->listeners, BackgroundErrorReason::kCompaction,
+            &new_bg_error, db_mutex_);
         if (!new_bg_error.ok()) {
           *db_bg_error_ = new_bg_error;
         }
