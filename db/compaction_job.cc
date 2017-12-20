@@ -82,8 +82,13 @@ std::vector<InternalKey> MergeRangeSet(
         output.back().DecodeFrom(iter->key());
       }
       else {
-        iter->Next();
-        if (iter->Valid()) {
+        if (iter->key() == left.Encode()) {
+          iter->Next();
+          if (iter->Valid()) {
+            output.back().DecodeFrom(iter->key());
+          }
+        }
+        else {
           output.back().DecodeFrom(iter->key());
         }
       }
@@ -101,8 +106,13 @@ std::vector<InternalKey> MergeRangeSet(
         output.back().DecodeFrom(iter->key());
       }
       else {
-        iter->Prev();
-        if (iter->Valid()) {
+        if (iter->key() == right.Encode()) {
+          iter->Prev();
+          if (iter->Valid()) {
+            output.back().DecodeFrom(iter->key());
+          }
+        }
+        else {
           output.back().DecodeFrom(iter->key());
         }
       }
