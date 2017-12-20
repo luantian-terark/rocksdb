@@ -232,8 +232,8 @@ InternalIterator* TableCache::NewIterator(
     } else {
       result = table_reader->NewIterator(options, arena, skip_filters);
       if (meta.partial_removed) {
-        InternalIterator* wrapper = NewRangeWrappedInternalIterator(
-          result, icomparator, &meta.range_set);
+        auto wrapper = NewRangeWrappedInternalIterator(
+            result, icomparator, &meta.range_set, arena);
         wrapper->RegisterCleanup([](void* arg1, void* arg2) {
           auto iter = reinterpret_cast<InternalIterator*>(arg1);
           if (arg2) {
@@ -328,13 +328,13 @@ Status TableCache::Get(const ReadOptions& options,
   Slice k = raw_k;
   while (meta.partial_removed) {
     auto find = std::upper_bound(meta.range_set.begin(), meta.range_set.end(),
-      k, [&](const Slice& l, const InternalKey& r) {
+        k, [&](const Slice& l, const InternalKey& r) {
       return internal_comparator.Compare(l, r.Encode()) < 0;
     });
     if ((find - meta.range_set.begin()) % 2 == 0) {
       if (find != meta.range_set.end()) {
         if (internal_comparator.user_comparator()->Compare(ExtractUserKey(k),
-          ExtractUserKey(find->Encode())) == 0) {
+            ExtractUserKey(find->Encode())) == 0) {
           k = find->Encode();
           break;
         }

@@ -328,33 +328,26 @@ class VersionBuilder::Rep {
       // Drop any deleted files.  Store the result in *v.
       const auto& base_files = base_vstorage_->LevelFiles(level);
       const auto& unordered_added_files = levels_[level].added_files;
-      const size_t add_files_size = unordered_added_files.size();
-      vstorage->Reserve(level,
-                        base_files.size() + add_files_size);
+      const size_t add_files_num = unordered_added_files.size();
+      vstorage->Reserve(level, base_files.size() + add_files_num);
 
       // Merge base files and added files for the level.
       std::vector<FileMetaData*> added_files;
-      added_files.reserve(base_files.size() + add_files_size);
+      added_files.reserve(base_files.size() + add_files_num);
       for (const auto& pair : unordered_added_files) {
         added_files.push_back(pair.second);
       }
-      added_files.insert(added_files.end(),
-        base_files.begin(), base_files.end());
-      if (add_files_size > 0) {
+      added_files.insert(added_files.end(), base_files.begin(),
+                         base_files.end());
+      if (add_files_num > 0) {
         if (!base_files.empty()) {
-          // first sort added files with file num
-          std::sort(added_files.begin(), added_files.begin() + add_files_size,
-            FileNumberComparator());
-          // then remove base files
-          auto is_added_file =
-            [this, &added_files, add_files_size](FileMetaData* meta) {
-            return std::binary_search(added_files.begin(),
-              added_files.begin() + add_files_size,
-              meta, FileNumberComparator());
-          };
-          added_files.erase(std::remove_if(
-            added_files.begin() + add_files_size, added_files.end(),
-            is_added_file), added_files.end());
+          std::stable_sort(added_files.begin(),
+                           added_files.begin() + add_files_num,
+                           FileNumberComparator());
+          auto end = std::unique(added_files.begin(),
+                                 added_files.begin() + add_files_num,
+                                 FileNumberComparator());
+          added_files.erase(end, added_files.end());
         }
         std::sort(added_files.begin(), added_files.end(), cmp);
       }

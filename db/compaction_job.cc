@@ -74,27 +74,25 @@ std::vector<InternalKey> MergeRangeSet(
   assert(erase_set.size() % 2 == 0);
   size_t ri = 0, ei = 0;  // index
   size_t rc, ec;          // change
-  auto add_left_range = [&](const InternalKey& left, bool include) {
+  auto put_left_bound = [&](const InternalKey& left, bool include) {
     output.emplace_back();
     iter->Seek(left.Encode());
     if (iter->Valid()) {
       if (include) {
         output.back().DecodeFrom(iter->key());
-      }
-      else {
+      } else {
         if (iter->key() == left.Encode()) {
           iter->Next();
           if (iter->Valid()) {
             output.back().DecodeFrom(iter->key());
           }
-        }
-        else {
+        } else {
           output.back().DecodeFrom(iter->key());
         }
       }
     }
   };
-  auto add_right_range = [&](const InternalKey& right, bool include) {
+  auto put_right_bound = [&](const InternalKey& right, bool include) {
     if (!output.back().Valid()) {
       output.pop_back();
       return;
@@ -104,21 +102,19 @@ std::vector<InternalKey> MergeRangeSet(
     if (iter->Valid()) {
       if (include) {
         output.back().DecodeFrom(iter->key());
-      }
-      else {
+      } else {
         if (iter->key() == right.Encode()) {
           iter->Prev();
           if (iter->Valid()) {
             output.back().DecodeFrom(iter->key());
           }
-        }
-        else {
+        } else {
           output.back().DecodeFrom(iter->key());
         }
       }
     }
     if (!output.back().Valid()
-      || ic.Compare(*(output.end() - 2), output.back()) > 0) {
+        || ic.Compare(*(output.end() - 2), output.back()) > 0) {
       output.pop_back();
       output.pop_back();
     }
@@ -128,39 +124,39 @@ std::vector<InternalKey> MergeRangeSet(
     int c;
     if (ri < range_set.size() && ei < erase_set.size()) {
       c = ic.Compare(range_set[ri], erase_set[ei]);
-    }
-    else {
+    } else {
       c = ri < range_set.size() ? -1 : 1;
     }
     rc = c <= 0;
     ec = c >= 0;
 #define MergeRangeSet_CASE(a,b,c,d) ((a) | ((b) << 1) | ((c) << 2) | ((d) << 3))
     switch (MergeRangeSet_CASE(ri % 2, ei % 2, rc, ec)) {
-      // out range , out erase , begin range
+    // out range , out erase , begin range
     case MergeRangeSet_CASE(0, 0, 1, 0):
-      add_left_range(range_set[ri], true);
+      put_left_bound(range_set[ri], true);
       break;
-      // in range , out erase , end range
+    // in range , out erase , end range
     case MergeRangeSet_CASE(1, 0, 1, 0):
-      add_right_range(range_set[ri], true);
+      put_right_bound(range_set[ri], true);
       break;
-      // in range , out erase , begin erase
+    // in range , out erase , begin erase
     case MergeRangeSet_CASE(1, 0, 0, 1):
-      // in range , out erase , end range & begin erase
+    // in range , out erase , end range & begin erase
     case MergeRangeSet_CASE(1, 0, 1, 1):
-      add_right_range(erase_set[ei], false);
+      put_right_bound(erase_set[ei], false);
       break;
-      // in range , in erase ,  end erase
+    // in range , in erase ,  end erase
     case MergeRangeSet_CASE(1, 1, 0, 1):
-      // out range , out erase , end range & begin range
+    // out range , out erase , end range & begin range
     case MergeRangeSet_CASE(0, 1, 1, 1):
-      add_left_range(erase_set[ei], false);
+      put_left_bound(erase_set[ei], false);
       break;
     }
 #undef MergeRangeSet_CASE
     ri += rc;
     ei += ec;
   } while (ri != range_set.size() || ei != erase_set.size());
+  assert(output.size() % 2 == 0);
   return output;
 }
 
@@ -181,13 +177,13 @@ struct PartialRemoveMetaData {
     auto table_reader = file->fd.table_reader;
     assert(table_reader);
     std::unique_ptr<InternalIterator> iter(
-      table_reader->NewIterator(ReadOptions()));
+        table_reader->NewIterator(ReadOptions()));
     range_set = std::move(MergeRangeSet(file->range_set, erase_set, ic, iter.get()));
     if (range_set.empty()) {
       return;
     }
     if (range_set.size() == file->range_set.size()
-      && std::equal(range_set.begin(), range_set.end(), file->range_set.begin(),
+        && std::equal(range_set.begin(), range_set.end(), file->range_set.begin(),
         [&](const InternalKey& l, const InternalKey& r) {
       return ic.Compare(l, r) == 0;
     })) {
@@ -195,17 +191,17 @@ struct PartialRemoveMetaData {
       return;
     }
     size_t sst_size = std::max<uint64_t>(1,
-      table_reader->ApproximateOffsetOf(iter->key()));
+        table_reader->ApproximateOffsetOf(iter->key()));
     size_t alive_size = 0;
     for (size_t i = 0; i < range_set.size(); i += 2) {
       uint64_t left_offset =
-        table_reader->ApproximateOffsetOf(range_set[i].Encode());
+          table_reader->ApproximateOffsetOf(range_set[i].Encode());
       uint64_t right_offset =
-        table_reader->ApproximateOffsetOf(range_set[i + 1].Encode());
+          table_reader->ApproximateOffsetOf(range_set[i + 1].Encode());
       alive_size += right_offset - left_offset;
     }
-    partial_removed = std::max<uint64_t>(1,
-      (std::max(alive_size, sst_size) - alive_size) * 100 / sst_size);
+    partial_removed = std::min<uint64_t>(100, std::max<uint64_t>(1,
+        (std::max(alive_size, sst_size) - alive_size) * 100 / sst_size));
   }
 };
 
@@ -215,11 +211,11 @@ std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
     const InternalKey& smallest,
     const InternalKey& largest) {
   auto left = std::lower_bound(files.begin(), files.end(), smallest,
-    [&ic](const FileMetaData* l, const InternalKey& r) {
+      [&ic](const FileMetaData* l, const InternalKey& r) {
     return ic.Compare(l->largest(), r) < 0;
   });
   auto right = std::upper_bound(files.begin(), files.end(), largest,
-    [&ic](const InternalKey& l, const FileMetaData* r) {
+      [&ic](const InternalKey& l, const FileMetaData* r) {
     return ic.Compare(l, r->smallest()) < 0;
   });
   return std::make_pair(left - files.begin(), right - files.begin() - 1);
@@ -1096,7 +1092,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         }
       }
       if (sub_compact->compaction->immutable_cf_options()->enable_partial_remove
-        && next_key && ShouldFinishCompaction(sub_compact, *next_key)) {
+          && next_key && ShouldFinishCompaction(sub_compact, *next_key)) {
         sub_compact->partial_remove_info.active = true;
         break;
       }
@@ -1157,8 +1153,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       IterKey end_iter;
       end_iter.SetInternalKey(*end, kMaxSequenceNumber, kValueTypeForSeek);
       input->SeekForPrev(end_iter.GetInternalKey());
-    }
-    else {
+    } else {
       input->SeekToLast();
     }
     sub_compact->partial_remove_info.largest.DecodeFrom(input->key());
@@ -1416,7 +1411,7 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
     return false;
   }
   auto it = std::find_if(inputs->rbegin(), inputs->rend(),
-    [output_level](const CompactionInputFiles& level) {
+      [output_level](const CompactionInputFiles& level) {
     return level.level == output_level;
   });
   // make sure output level sst partial removable
@@ -1427,7 +1422,7 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
     if (overlap.first == overlap.second) {
       auto file = it->files[overlap.first];
       if (ic.Compare(smallest, file->smallest()) > 0
-        && ic.Compare(largest, file->largest()) < 0) {
+          && ic.Compare(largest, file->largest()) < 0) {
         // output sst can't partial remove in middle ...
         return false;
       }
@@ -1453,6 +1448,7 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
       --overlap.second;
     }
     if (overlap.first <= overlap.second) {
+      // found !
       return true;
     }
   }
@@ -1488,7 +1484,8 @@ Status CompactionJob::InstallCompactionResults(
   // Add compaction outputs
   compaction->AddInputDeletions(compact_->compaction->edit());
   if (std::find_if(compact_->sub_compact_states.begin(),
-    compact_->sub_compact_states.end(), [](const CompactionJob::SubcompactionState& s) {
+      compact_->sub_compact_states.end(),
+      [](const CompactionJob::SubcompactionState& s) {
     return s.partial_remove_info.active;
   }) != compact_->sub_compact_states.end()) {
     auto inputs = compaction->inputs();
@@ -1503,10 +1500,11 @@ Status CompactionJob::InstallCompactionResults(
       for (auto& file : level.files) {
         PartialRemoveMetaData meta(file, erase_set, ic);
         if (!meta.range_set.empty()) {
-          compaction->edit()->AddFile(level.level, file->fd.GetNumber(),
-            file->fd.GetPathId(), file->fd.GetFileSize(), meta.range_set,
-            file->smallest_seqno, file->largest_seqno,
-            meta.partial_removed > 0, static_cast<uint8_t>(meta.partial_removed));
+          compaction->edit()->AddFile(
+              level.level, file->fd.GetNumber(),
+              file->fd.GetPathId(), file->fd.GetFileSize(), meta.range_set,
+              file->smallest_seqno, file->largest_seqno,
+              meta.partial_removed > 0, static_cast<uint8_t>(meta.partial_removed));
         }
       }
     }

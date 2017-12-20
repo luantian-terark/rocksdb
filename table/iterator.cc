@@ -17,9 +17,10 @@ namespace rocksdb {
 
 class RangeWrappedInternalIterator : public InternalIterator {
 public:
-  RangeWrappedInternalIterator(InternalIterator* iter,
-    const InternalKeyComparator& internal_key_comp,
-    const std::vector<InternalKey>* range_set)
+  RangeWrappedInternalIterator(
+      InternalIterator* iter,
+      const InternalKeyComparator& internal_key_comp,
+      const std::vector<InternalKey>* range_set)
     : iter_(iter)
     , ic_(internal_key_comp)
     , range_set_(range_set)
@@ -52,8 +53,9 @@ public:
       if (!iter_->Valid()) {
         break;
       }
-      auto find = std::upper_bound(range_set_->begin(), range_set_->end(),
-        iter_->key(), [this](const Slice& l, const InternalKey& r) {
+      auto find = std::upper_bound(
+          range_set_->begin(), range_set_->end(),
+          iter_->key(), [this](const Slice& l, const InternalKey& r) {
         return ic_.Compare(l, r.Encode()) < 0;
       });
       if ((find - range_set_->begin()) % 2 == 1) {
@@ -79,9 +81,9 @@ public:
       s = (largest_ + 1)->Encode();
     }
     assert(!Valid() || ((smallest_ - range_set_->data()) % 2 == 0
-      && (largest_ - range_set_->data()) % 2 == 1));
+        && (largest_ - range_set_->data()) % 2 == 1));
     assert(!Valid() || (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0
-      && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
+        && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
   }
   void SeekForPrev(const Slice& target) override final {
     Slice s = target;
@@ -90,8 +92,9 @@ public:
       if (!iter_->Valid()) {
         break;
       }
-      auto find = std::upper_bound(range_set_->rbegin(), range_set_->rend(),
-        iter_->key(), [this](const Slice& l, const InternalKey& r) {
+      auto find = std::upper_bound(
+          range_set_->rbegin(), range_set_->rend(),
+          iter_->key(), [this](const Slice& l, const InternalKey& r) {
         return ic_.Compare(l, r.Encode()) > 0;
       });
       if ((find - range_set_->rbegin()) % 2 == 1) {
@@ -117,9 +120,9 @@ public:
       s = (smallest_ - 1)->Encode();
     }
     assert(!Valid() || ((smallest_ - range_set_->data()) % 2 == 0
-      && (largest_ - range_set_->data()) % 2 == 1));
+        && (largest_ - range_set_->data()) % 2 == 1));
     assert(!Valid() || (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0
-      && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
+        && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
   }
   void Next() override final {
     assert(!invalid_);
@@ -127,8 +130,7 @@ public:
     if (iter_->Valid() && ic_.Compare(iter_->key(), largest_->Encode()) > 0) {
       if (largest_ == &range_set_->back()) {
         invalid_ = true;
-      }
-      else {
+      } else {
         smallest_ += 2;
         largest_ += 2;
         Seek(smallest_->Encode());
@@ -141,8 +143,7 @@ public:
     if (iter_->Valid() && ic_.Compare(iter_->key(), smallest_->Encode()) < 0) {
       if (smallest_ == &range_set_->front()) {
         invalid_ = true;
-      }
-      else {
+      } else {
         largest_ -= 2;
         smallest_ -= 2;
         SeekForPrev(largest_->Encode());
@@ -333,10 +334,15 @@ Iterator* NewErrorIterator(const Status& status) {
 }
 
 InternalIterator* NewRangeWrappedInternalIterator(
-  InternalIterator* iter,
-  const InternalKeyComparator& ic,
-  const std::vector<InternalKey>* range_set) {
-  return new RangeWrappedInternalIterator(iter, ic, range_set);
+    InternalIterator* iter, const InternalKeyComparator& ic,
+    const std::vector<InternalKey>* range_set, Arena* arena) {
+  if (arena == nullptr) {
+    return new RangeWrappedInternalIterator(iter, ic, range_set);
+  } else {
+    auto mem = arena->AllocateAligned(
+        sizeof(RangeWrappedInternalIterator));
+    return new (mem) RangeWrappedInternalIterator(iter, ic, range_set);
+  }
 }
 
 InternalIterator* NewEmptyInternalIterator() {

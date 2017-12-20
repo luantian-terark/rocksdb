@@ -96,6 +96,13 @@ class IteratorWrapper {
 };
 
 class Arena;
+
+// Return a range wrapped InternalIterator
+// range_set not owned
+extern InternalIterator* NewRangeWrappedInternalIterator(
+    InternalIterator* iter, const InternalKeyComparator& internal_key_comp,
+    const std::vector<InternalKey>* range_set, Arena* arena);
+
 // Return an empty iterator (yields nothing) allocated from arena.
 extern InternalIterator* NewEmptyInternalIterator(Arena* arena);
 
