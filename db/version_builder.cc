@@ -84,6 +84,11 @@ class VersionBuilder::Rep {
       return f1->fd.GetNumber() < f2->fd.GetNumber();
     }
   };
+  struct FileNumberEqual {
+    bool operator()(FileMetaData* f1, FileMetaData* f2) const {
+      return f1->fd.GetNumber() == f2->fd.GetNumber();
+    }
+  };
 
   struct LevelState {
     std::unordered_set<uint64_t> deleted_files;
@@ -341,12 +346,10 @@ class VersionBuilder::Rep {
                          base_files.end());
       if (add_files_num > 0) {
         if (!base_files.empty()) {
-          std::stable_sort(added_files.begin(),
-                           added_files.begin() + add_files_num,
+          std::stable_sort(added_files.begin(), added_files.end(),
                            FileNumberComparator());
-          auto end = std::unique(added_files.begin(),
-                                 added_files.begin() + add_files_num,
-                                 FileNumberComparator());
+          auto end = std::unique(added_files.begin(), added_files.end(),
+                                 FileNumberEqual());
           added_files.erase(end, added_files.end());
         }
         std::sort(added_files.begin(), added_files.end(), cmp);

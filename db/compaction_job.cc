@@ -161,7 +161,7 @@ std::vector<InternalKey> MergeRangeSet(
 }
 
 struct PartialRemoveInfo {
-  // from seek(begin) to seek_for_prev(end) has been removed
+  // from seek(smallest) to seek_for_prev(largest) has been removed
   InternalKey smallest;
   InternalKey largest;
   bool active = false;

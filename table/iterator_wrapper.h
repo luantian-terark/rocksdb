@@ -10,6 +10,7 @@
 #pragma once
 
 #include <set>
+#include <vector>
 
 #include "table/internal_iterator.h"
 
@@ -96,6 +97,8 @@ class IteratorWrapper {
 };
 
 class Arena;
+class InternalKey;
+class InternalKeyComparator;
 
 // Return a range wrapped InternalIterator
 // range_set not owned

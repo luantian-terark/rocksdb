@@ -339,11 +339,8 @@ Status TableCache::Get(const ReadOptions& options,
           break;
         }
       }
-      if (find == meta.range_set.begin()) {
-        return Status::OK();
-      }
-      --find;
-      if (internal_comparator.Compare(find->Encode(), k) != 0) {
+      if (find == meta.range_set.begin()
+          || internal_comparator.Compare(std::prev(find)->Encode(), k) != 0) {
         return Status::OK();
       }
     }

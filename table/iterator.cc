@@ -21,12 +21,12 @@ public:
       InternalIterator* iter,
       const InternalKeyComparator& internal_key_comp,
       const std::vector<InternalKey>* range_set)
-    : iter_(iter)
-    , ic_(internal_key_comp)
-    , range_set_(range_set)
-    , smallest_(nullptr)
-    , largest_(nullptr)
-    , invalid_(false) {
+      : iter_(iter),
+        ic_(internal_key_comp),
+        range_set_(range_set),
+        smallest_(nullptr),
+        largest_(nullptr),
+        invalid_(false) {
     assert(iter_);
     assert(range_set_->size() >= 2);
   }

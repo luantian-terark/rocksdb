@@ -7,7 +7,6 @@
 #pragma once
 
 #include <string>
-#include <vector>
 #include "rocksdb/comparator.h"
 #include "rocksdb/iterator.h"
 #include "rocksdb/status.h"
@@ -15,8 +14,6 @@
 namespace rocksdb {
 
 class PinnedIteratorsManager;
-class InternalKeyComparator;
-class InternalKey;
 
 class InternalIterator : public Cleanable {
  public:
