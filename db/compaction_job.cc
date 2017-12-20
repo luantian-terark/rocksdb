@@ -113,8 +113,8 @@ std::vector<InternalKey> MergeRangeSet(
         }
       }
     }
-    if (!output.back().Valid()
-        || ic.Compare(*(output.end() - 2), output.back()) > 0) {
+    if (!output.back().Valid() ||
+        ic.Compare(*(output.end() - 2), output.back()) > 0) {
       output.pop_back();
       output.pop_back();
     }

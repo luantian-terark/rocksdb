@@ -107,7 +107,7 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
 
   for (size_t i = 0; i < new_files_.size(); i++) {
     const FileMetaData& f = new_files_[i].second;
-    if (!f.range_set.front().Valid() || !f.largest().Valid()) {
+    if (!f.smallest().Valid() || !f.largest().Valid()) {
       return false;
     }
     bool has_customized_fields = false;

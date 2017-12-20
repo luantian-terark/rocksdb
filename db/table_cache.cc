@@ -333,14 +333,14 @@ Status TableCache::Get(const ReadOptions& options,
     });
     if ((find - meta.range_set.begin()) % 2 == 0) {
       if (find != meta.range_set.end()) {
-        if (internal_comparator.user_comparator()->Compare(ExtractUserKey(k),
-            ExtractUserKey(find->Encode())) == 0) {
+        if (internal_comparator.user_comparator()->Compare(
+                ExtractUserKey(k), ExtractUserKey(find->Encode())) == 0) {
           k = find->Encode();
           break;
         }
       }
-      if (find == meta.range_set.begin()
-          || internal_comparator.Compare(std::prev(find)->Encode(), k) != 0) {
+      if (find == meta.range_set.begin() ||
+          internal_comparator.Compare(std::prev(find)->Encode(), k) != 0) {
         return Status::OK();
       }
     }

@@ -80,10 +80,9 @@ public:
       }
       s = (largest_ + 1)->Encode();
     }
-    assert(!Valid() || ((smallest_ - range_set_->data()) % 2 == 0
-        && (largest_ - range_set_->data()) % 2 == 1));
-    assert(!Valid() || (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0
-        && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
+    assert(!Valid() ||
+           (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0 &&
+             ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
   }
   void SeekForPrev(const Slice& target) override final {
     Slice s = target;
@@ -119,10 +118,9 @@ public:
       }
       s = (smallest_ - 1)->Encode();
     }
-    assert(!Valid() || ((smallest_ - range_set_->data()) % 2 == 0
-        && (largest_ - range_set_->data()) % 2 == 1));
-    assert(!Valid() || (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0
-        && ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
+    assert(!Valid() ||
+           (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0 &&
+             ic_.Compare(largest_->Encode(), iter_->key()) >= 0));
   }
   void Next() override final {
     assert(!invalid_);
