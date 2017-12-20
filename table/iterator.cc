@@ -124,7 +124,7 @@ public:
   void Next() override final {
     assert(!invalid_);
     iter_->Next();
-    if (iter_->Valid() && ic_.Compare(iter_->key(), largest_->Encode()) >= 0) {
+    if (iter_->Valid() && ic_.Compare(iter_->key(), largest_->Encode()) > 0) {
       if (largest_ == &range_set_->back()) {
         invalid_ = true;
       }
@@ -138,13 +138,13 @@ public:
   void Prev() override final {
     assert(!invalid_);
     iter_->Prev();
-    if (iter_->Valid() && ic_.Compare(iter_->key(), smallest_->Encode()) <= 0) {
+    if (iter_->Valid() && ic_.Compare(iter_->key(), smallest_->Encode()) < 0) {
       if (smallest_ == &range_set_->front()) {
         invalid_ = true;
       }
       else {
-        largest_ += 2;
-        smallest_ += 2;
+        largest_ -= 2;
+        smallest_ -= 2;
         iter_->SeekForPrev(largest_->Encode());
       }
     }
