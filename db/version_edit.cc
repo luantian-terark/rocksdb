@@ -172,9 +172,9 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
           char p = static_cast<char>(f.partial_removed);
           PutLengthPrefixedSlice(dst, Slice(&p, 1));
       }
-      for (size_t ri = 1; ri < f.range_set.size() - 1; ++ri) {
+      for (size_t j = 1; j < f.range_set.size() - 1; ++j) {
         PutVarint32(dst, CustomTag::kExpandRangeSet);
-        PutLengthPrefixedSlice(dst, f.range_set[ri].Encode());
+        PutLengthPrefixedSlice(dst, f.range_set[j].Encode());
       }
       TEST_SYNC_POINT_CALLBACK("VersionEdit::EncodeTo:NewFile4:CustomizeFields",
                                dst);
@@ -525,10 +525,12 @@ std::string VersionEdit::DebugString(bool hex_key) const {
     AppendNumberTo(&r, f.fd.GetNumber());
     r.append(" ");
     AppendNumberTo(&r, f.fd.GetFileSize());
-    r.append(" ");
-    r.append(f.smallest().DebugString(hex_key));
-    r.append(" .. ");
-    r.append(f.largest().DebugString(hex_key));
+    for (size_t j = 0; j < f.range_set.size(); j += 2) {
+      r.append(" ");
+      r.append(f.range_set[j].DebugString(hex_key));
+      r.append(" .. ");
+      r.append(f.range_set[j + 1].DebugString(hex_key));
+    }
   }
   r.append("\n  ColumnFamily: ");
   AppendNumberTo(&r, column_family_);
@@ -593,8 +595,10 @@ std::string VersionEdit::DebugJSON(int edit_num, bool hex_key) const {
       const FileMetaData& f = new_files_[i].second;
       jw << "FileNumber" << f.fd.GetNumber();
       jw << "FileSize" << f.fd.GetFileSize();
-      jw << "SmallestIKey" << f.smallest().DebugString(hex_key);
-      jw << "LargestIKey" << f.largest().DebugString(hex_key);
+      for (size_t j = 0; j < f.range_set.size(); j += 2) {
+        jw << "SmallestIKey" << f.range_set[j].DebugString(hex_key);
+        jw << "LargestIKey" << f.range_set[j + 1].DebugString(hex_key);
+      }
       jw.EndArrayedObject();
     }
 

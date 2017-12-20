@@ -327,7 +327,21 @@ Status TableCache::Get(const ReadOptions& options,
   const FileDescriptor& fd = meta.fd;
   assert(internal_comparator.Compare(k, meta.smallest().Encode()) >= 0);
   assert(internal_comparator.Compare(k, meta.largest().Encode()) <= 0);
-
+  if (meta.partial_removed) {
+    auto find = std::upper_bound(meta.range_set.begin(), meta.range_set.end(),
+      k, [&](const Slice& l, const InternalKey& r) {
+      return internal_comparator.Compare(l, r.Encode()) < 0;
+    });
+    if ((find - meta.range_set.begin()) % 2 == 0) {
+      if (find == meta.range_set.begin()) {
+        return Status::OK();
+      }
+      --find;
+      if (internal_comparator.Compare(find->Encode(), k) != 0) {
+        return Status::OK();
+      }
+    }
+  }
   std::string* row_cache_entry = nullptr;
   bool done = false;
 #ifndef ROCKSDB_LITE

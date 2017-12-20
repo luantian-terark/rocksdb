@@ -62,51 +62,159 @@
 
 namespace rocksdb {
 
+std::vector<InternalKey> MergeRangeSet(
+    const std::vector<InternalKey>& range_set,
+    const std::vector<InternalKey>& erase_set,
+    const InternalKeyComparator& ic,
+    InternalIterator* iter) {
+  std::vector<InternalKey> output;
+  assert(!range_set.empty());
+  assert(!erase_set.empty());
+  assert(range_set.size() % 2 == 0);
+  assert(erase_set.size() % 2 == 0);
+  size_t ri = 0, ei = 0;  // index
+  size_t rc, ec;          // change
+  auto add_left_range = [&](const InternalKey& left, bool include) {
+    output.emplace_back();
+    iter->Seek(left.Encode());
+    if (iter->Valid()) {
+      if (include) {
+        output.back().DecodeFrom(iter->key());
+      }
+      else {
+        iter->Next();
+        if (iter->Valid()) {
+          output.back().DecodeFrom(iter->key());
+        }
+      }
+    }
+  };
+  auto add_right_range = [&](const InternalKey& right, bool include) {
+    if (!output.back().Valid()) {
+      output.pop_back();
+      return;
+    }
+    output.emplace_back();
+    iter->SeekForPrev(right.Encode());
+    if (iter->Valid()) {
+      if (include) {
+        output.back().DecodeFrom(iter->key());
+      }
+      else {
+        iter->Prev();
+        if (iter->Valid()) {
+          output.back().DecodeFrom(iter->key());
+        }
+      }
+    }
+    if (!output.back().Valid()
+      || ic.Compare(*(output.end() - 2), output.back()) > 0) {
+      output.pop_back();
+      output.pop_back();
+    }
+  };
+
+  do {
+    int c;
+    if (ri < range_set.size() && ei < erase_set.size()) {
+      c = ic.Compare(range_set[ri], erase_set[ei]);
+    }
+    else {
+      c = ri < range_set.size() ? -1 : 1;
+    }
+    rc = c <= 0;
+    ec = c >= 0;
+#define MergeRangeSet_CASE(a,b,c,d) ((a) | ((b) << 1) | ((c) << 2) | ((d) << 3))
+    switch (MergeRangeSet_CASE(ri % 2, ei % 2, rc, ec)) {
+      // out range , out erase , begin range
+    case MergeRangeSet_CASE(0, 0, 1, 0):
+      add_left_range(range_set[ri], true);
+      break;
+      // in range , out erase , end range
+    case MergeRangeSet_CASE(1, 0, 1, 0):
+      add_right_range(range_set[ri], true);
+      break;
+      // in range , out erase , begin erase
+    case MergeRangeSet_CASE(1, 0, 0, 1):
+      // in range , out erase , end range & begin erase
+    case MergeRangeSet_CASE(1, 0, 1, 1):
+      add_right_range(erase_set[ei], false);
+      break;
+      // in range , in erase ,  end erase
+    case MergeRangeSet_CASE(1, 1, 0, 1):
+      // out range , out erase , end range & begin range
+    case MergeRangeSet_CASE(0, 1, 1, 1):
+      add_left_range(erase_set[ei], false);
+      break;
+    }
+#undef MergeRangeSet_CASE
+    ri += rc;
+    ei += ec;
+  } while (ri != range_set.size() || ei != erase_set.size());
+  return output;
+}
+
 struct PartialRemoveInfo {
   // from seek(begin) to seek_for_prev(end) has been removed
   InternalKey smallest;
   InternalKey largest;
   bool active = false;
 };
+
 struct PartialRemoveMetaData {
-  FileMetaData* file = nullptr;
   std::vector<InternalKey> range_set;
-  uint64_t sst_size = 0;
   uint64_t partial_removed = 0;
-  unique_ptr<InternalIterator> iter;
 
-  InternalKey& smallest() { return range_set.front(); }
-  const InternalKey& smallest() const { return range_set.front(); }
-
-  InternalKey& largest() { return range_set.back(); }
-  const InternalKey& largest() const { return range_set.back(); }
-
-  PartialRemoveMetaData() {
-    range_set.resize(2);
-  }
-
-  // for FindLevelOverlap
-  const PartialRemoveMetaData* operator->() const {
-    return this;
+  PartialRemoveMetaData(FileMetaData* file,
+                        const std::vector<InternalKey>& erase_set,
+                        const InternalKeyComparator& ic) {
+    auto table_reader = file->fd.table_reader;
+    assert(table_reader);
+    std::unique_ptr<InternalIterator> iter(
+      table_reader->NewIterator(ReadOptions()));
+    range_set = std::move(MergeRangeSet(file->range_set, erase_set, ic, iter.get()));
+    if (range_set.empty()) {
+      return;
+    }
+    if (range_set.size() == file->range_set.size()
+      && std::equal(range_set.begin(), range_set.end(), file->range_set.begin(),
+        [&](const InternalKey& l, const InternalKey& r) {
+      return ic.Compare(l, r) == 0;
+    })) {
+      partial_removed = file->partial_removed;
+      return;
+    }
+    size_t sst_size = std::max<uint64_t>(1,
+      table_reader->ApproximateOffsetOf(iter->key()));
+    size_t alive_size = 0;
+    for (size_t i = 0; i < range_set.size(); i += 2) {
+      uint64_t left_offset =
+        table_reader->ApproximateOffsetOf(range_set[i].Encode());
+      uint64_t right_offset =
+        table_reader->ApproximateOffsetOf(range_set[i + 1].Encode());
+      alive_size += right_offset - left_offset;
+    }
+    partial_removed = std::max<uint64_t>(1,
+      (std::max(alive_size, sst_size) - alive_size) * 100 / sst_size);
   }
 };
 
-template<class meta>
 std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
-  const std::vector<meta>& files,
-  const InternalKeyComparator& ic,
-  const InternalKey& smallest,
-  const InternalKey& largest) {
+    const std::vector<FileMetaData*>& files,
+    const InternalKeyComparator& ic,
+    const InternalKey& smallest,
+    const InternalKey& largest) {
   auto left = std::lower_bound(files.begin(), files.end(), smallest,
-    [&ic](const meta& l, const InternalKey& r) {
+    [&ic](const FileMetaData* l, const InternalKey& r) {
     return ic.Compare(l->largest(), r) < 0;
   });
-  auto right = std::lower_bound(files.rbegin(), files.rend(), largest,
-    [&ic](const meta& l, const InternalKey& r) {
-    return ic.Compare(l->smallest(), r) > 0;
+  auto right = std::upper_bound(files.begin(), files.end(), largest,
+    [&ic](const InternalKey& l, const FileMetaData* r) {
+    return ic.Compare(l, r->smallest()) < 0;
   });
-  return std::make_pair(left - files.begin(), files.rend() - right - 1);
+  return std::make_pair(left - files.begin(), right - files.begin() - 1);
 }
+
 
 // Maintains state for each sub-compaction
 struct CompactionJob::SubcompactionState {
@@ -1315,50 +1423,30 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
       }
     }
   }
-  bool can_partial_remove = false;
   for (auto& level : *inputs) {
     if (level.level == 0) {
-      // each level 0 sst need check
-      for (auto& file : level.files) {
-        if (ic.Compare(smallest, file->smallest()) <= 0
-          && ic.Compare(largest, file->largest()) >= 0) {
-          can_partial_remove = true;
-        }
-        else if (ic.Compare(smallest, file->smallest()) > 0
-          && ic.Compare(largest, file->largest()) < 0) {
-          // in middle ...
-          return false;
-        }
-      }
+      continue;
     }
-    else {
-      if (level.files.empty()) {
-        continue;
-      }
-      auto overlap = FindLevelOverlap(level.files, ic, smallest, largest);
-      if (overlap.first > overlap.second) {
-        continue;
-      }
-      if (overlap.first == overlap.second
-        && ic.Compare(smallest, level.files[overlap.first]->smallest()) > 0
-        && ic.Compare(largest, level.files[overlap.second]->largest()) < 0) {
-        // in middle ...
-        return false;
-      }
-      if (ic.Compare(level.files[overlap.first]->smallest(), smallest) < 0) {
-        // can't cover left
-        ++overlap.first;
-      }
-      if (ic.Compare(level.files[overlap.second]->largest(), largest) > 0) {
-        // can't cover right
-        --overlap.second;
-      }
-      if (overlap.first <= overlap.second) {
-        can_partial_remove = true;
-      }
+    if (level.files.empty()) {
+      continue;
+    }
+    auto overlap = FindLevelOverlap(level.files, ic, smallest, largest);
+    if (overlap.first > overlap.second) {
+      continue;
+    }
+    if (ic.Compare(level.files[overlap.first]->smallest(), smallest) < 0) {
+      // can't cover left
+      ++overlap.first;
+    }
+    if (ic.Compare(level.files[overlap.second]->largest(), largest) > 0) {
+      // can't cover right
+      --overlap.second;
+    }
+    if (overlap.first <= overlap.second) {
+      return true;
     }
   }
-  return can_partial_remove;
+  return false;
 }
 
 Status CompactionJob::InstallCompactionResults(
@@ -1396,130 +1484,20 @@ Status CompactionJob::InstallCompactionResults(
     auto inputs = compaction->inputs();
     auto& ic = compaction->column_family_data()->internal_comparator();
 
-    std::vector<std::pair<int, std::vector<PartialRemoveMetaData>>> inputs_pick;
-    for (auto& level : *inputs) {
-      std::vector<PartialRemoveMetaData> level_pick;
-      for (auto& file : level.files) {
-        PartialRemoveMetaData meta;
-        meta.file = file;
-        meta.smallest() = file->smallest();
-        meta.largest() = file->largest();
-        meta.partial_removed = file->partial_removed;
-        level_pick.emplace_back(std::move(meta));
-      }
-      inputs_pick.emplace_back(level.level, std::move(level_pick));
-    }
-
-    auto trim_meta_data = [&ic, compaction](PartialRemoveMetaData* meta,
-      const InternalKey& smallest,
-      const InternalKey& largest) {
-
-      auto table_reader = meta->file->fd.table_reader;
-      assert(table_reader);
-      if (!meta->iter) {
-        meta->iter.reset(table_reader->NewIterator(ReadOptions()));
-      }
-      auto iter = meta->iter.get();
-      if (ic.Compare(largest, meta->smallest()) >= 0) {
-        iter->Seek(largest.Encode());
-        if (!iter->Valid()) {
-          return false;
-        }
-        if (iter->key() == largest.Encode()) {
-          iter->Next();
-        }
-        if (!iter->Valid()) {
-          return false;
-        }
-        assert(ic.Compare(iter->key(), meta->smallest().Encode()) > 0);
-        meta->smallest().DecodeFrom(iter->key());
-      }
-      else {
-        assert(ic.Compare(smallest, meta->largest()) <= 0);
-        iter->SeekForPrev(smallest.Encode());
-        if (!iter->Valid()) {
-          return false;
-        }
-        if (iter->key() == smallest.Encode()) {
-          iter->Prev();
-        }
-        if (!iter->Valid()) {
-          return false;
-        }
-        assert(ic.Compare(iter->key(), meta->largest().Encode()) < 0);
-        meta->largest().DecodeFrom(iter->key());
-      }
-      if (ic.Compare(meta->smallest(), meta->largest()) > 0) {
-        return false;
-      }
-      if (meta->sst_size == 0) {
-        iter->SeekToLast();
-        meta->sst_size = std::max<uint64_t>(1,
-          table_reader->ApproximateOffsetOf(iter->key()));
-      }
-      uint64_t smallest_offset =
-        table_reader->ApproximateOffsetOf(meta->smallest().Encode());
-      uint64_t largest_offset =
-        table_reader->ApproximateOffsetOf(meta->largest().Encode());
-      meta->partial_removed = std::max<uint64_t>(1,
-        (meta->sst_size - largest_offset + smallest_offset) * 100 / meta->sst_size);
-      return true;
-    };
+    std::vector<InternalKey> erase_set;
     for (const auto& sub_compact : compact_->sub_compact_states) {
-      auto& smallest = sub_compact.partial_remove_info.smallest;
-      auto& largest = sub_compact.partial_remove_info.largest;
-      for (auto& level : inputs_pick) {
-        std::vector<PartialRemoveMetaData> new_level;
-        if (level.first == 0) {
-          // each level 0 sst need check
-          for (auto& file : level.second) {
-            if (ic.Compare(smallest, file->smallest()) <= 0
-              && ic.Compare(largest, file->largest()) >= 0) {
-              // ok , whole sst removed
-              continue;
-            }
-            assert(ic.Compare(smallest, file->smallest()) <= 0
-              || ic.Compare(largest, file->largest()) >= 0);
-            if (trim_meta_data(&file, smallest, largest)) {
-              new_level.emplace_back(std::move(file));
-            }
-          }
-        }
-        else {
-          do {
-            if (level.second.empty()) {
-              break;
-            }
-            auto overlap = FindLevelOverlap(level.second, ic, smallest, largest);
-            if (overlap.first > overlap.second) {
-              new_level = std::move(level.second);
-              break;
-            }
-            for (ptrdiff_t i = 0; i < overlap.first; ++i) {
-              new_level.emplace_back(std::move(level.second[i]));
-            }
-            if (trim_meta_data(&level.second[overlap.first], smallest, largest)) {
-              new_level.emplace_back(std::move(level.second[overlap.first]));
-            }
-            if (overlap.first < overlap.second
-              && trim_meta_data(&level.second[overlap.second], smallest, largest)) {
-              new_level.emplace_back(std::move(level.second[overlap.second]));
-            }
-            for (ptrdiff_t i = overlap.second + 1; i < ptrdiff_t(level.second.size()); ++i) {
-              new_level.emplace_back(std::move(level.second[i]));
-            }
-          } while (false);
-        }
-        level.second.swap(new_level);
-      }
+      erase_set.emplace_back(sub_compact.partial_remove_info.smallest);
+      erase_set.emplace_back(sub_compact.partial_remove_info.largest);
     }
-    for (auto& level : inputs_pick) {
-      for (auto& file : level.second) {
-        compaction->edit()->AddFile(level.first, file.file->fd.GetNumber(),
-          file.file->fd.GetPathId(), file.file->fd.GetFileSize(),
-          { file.smallest(), file.largest() },
-          file.file->smallest_seqno, file.file->largest_seqno,
-          file.partial_removed > 0, static_cast<uint8_t>(file.partial_removed));
+    for (auto& level : *inputs) {
+      for (auto& file : level.files) {
+        PartialRemoveMetaData meta(file, erase_set, ic);
+        if (!meta.range_set.empty()) {
+          compaction->edit()->AddFile(level.level, file->fd.GetNumber(),
+            file->fd.GetPathId(), file->fd.GetFileSize(), meta.range_set,
+            file->smallest_seqno, file->largest_seqno,
+            meta.partial_removed > 0, static_cast<uint8_t>(meta.partial_removed));
+        }
       }
     }
   }

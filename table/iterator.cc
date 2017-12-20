@@ -131,7 +131,7 @@ public:
       else {
         smallest_ += 2;
         largest_ += 2;
-        iter_->Seek(smallest_->Encode());
+        Seek(smallest_->Encode());
       }
     }
   }
@@ -145,7 +145,7 @@ public:
       else {
         largest_ -= 2;
         smallest_ -= 2;
-        iter_->SeekForPrev(largest_->Encode());
+        SeekForPrev(largest_->Encode());
       }
     }
   }
