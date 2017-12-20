@@ -321,18 +321,24 @@ InternalIterator* TableCache::NewRangeTombstoneIterator(
 
 Status TableCache::Get(const ReadOptions& options,
                        const InternalKeyComparator& internal_comparator,
-                       const FileMetaData& meta, const Slice& k,
+                       const FileMetaData& meta, const Slice& raw_k,
                        GetContext* get_context, HistogramImpl* file_read_hist,
                        bool skip_filters, int level) {
   const FileDescriptor& fd = meta.fd;
-  assert(internal_comparator.Compare(k, meta.smallest().Encode()) >= 0);
-  assert(internal_comparator.Compare(k, meta.largest().Encode()) <= 0);
-  if (meta.partial_removed) {
+  Slice k = raw_k;
+  while (meta.partial_removed) {
     auto find = std::upper_bound(meta.range_set.begin(), meta.range_set.end(),
       k, [&](const Slice& l, const InternalKey& r) {
       return internal_comparator.Compare(l, r.Encode()) < 0;
     });
     if ((find - meta.range_set.begin()) % 2 == 0) {
+      if (find != meta.range_set.end()) {
+        if (internal_comparator.user_comparator()->Compare(ExtractUserKey(k),
+          ExtractUserKey(find->Encode())) == 0) {
+          k = find->Encode();
+          break;
+        }
+      }
       if (find == meta.range_set.begin()) {
         return Status::OK();
       }
@@ -341,6 +347,7 @@ Status TableCache::Get(const ReadOptions& options,
         return Status::OK();
       }
     }
+    break;
   }
   std::string* row_cache_entry = nullptr;
   bool done = false;
