@@ -191,6 +191,7 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
     assert(inputs_[i].level > inputs_[i - 1].level);
 
     if (input_range_ != nullptr && inputs_[i].level == output_level_) {
+      assert(ic.Compare(input_range_->smallest, input_range_->largest) < 0);
       // Make sure input_range not full covered by single optput level sst
       auto overlap = FindLevelOverlap(inputs_[i].files, ic,
                                       input_range_->smallest,
@@ -214,6 +215,7 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
   }
 
   GetBoundaryKeys(vstorage, inputs_, &smallest_user_key_, &largest_user_key_);
+  // shrink to input range
   if (input_range_ != nullptr) {
     if (ic.Compare(smallest_user_key_, input_range_->smallest.user_key()) < 0) {
       smallest_user_key_ = input_range_->smallest.user_key();

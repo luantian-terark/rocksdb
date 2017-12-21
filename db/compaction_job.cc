@@ -599,6 +599,18 @@ void CompactionJob::GenSubcompactionBoundaries() {
       }
     }
   }
+  auto input_range = c->input_range();
+  if (input_range != nullptr) {
+    auto &ic = cfd->ioptions()->internal_comparator;
+    for (auto& bound : bounds) {
+      if (ic.Compare(ExtractUserKey(bound), input_range->smallest.user_key()) < 0) {
+        bound = input_range->smallest.Encode();
+      }
+      if (ic.Compare(ExtractUserKey(bound), input_range->largest.user_key()) > 0) {
+        bound = input_range->largest.Encode();
+      }
+    }
+  }
 
   std::sort(bounds.begin(), bounds.end(),
     [cfd_comparator] (const Slice& a, const Slice& b) -> bool {
@@ -830,6 +842,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   std::unique_ptr<InternalIterator> input(versions_->MakeInputIterator(
       sub_compact->compaction, range_del_agg.get(), env_optiosn_for_read_));
 
+  // limit input in input_range
   if (sub_compact->compaction->input_range() != nullptr) {
     auto range_set = new std::vector<InternalKey>;
     range_set->emplace_back(sub_compact->compaction->input_range()->smallest);
@@ -1408,34 +1421,29 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
     // ignore level 0
     return false;
   }
-  auto it = std::find_if(inputs->rbegin(), inputs->rend(),
-      [output_level](const CompactionInputFiles& level) {
-    return level.level == output_level;
-  });
-  // make sure output level sst partial removable
-  if (it != inputs->rend() && !it->files.empty()) {
-    auto overlap = FindLevelOverlap(it->files, ic, smallest, largest);
-    // none overlap if overlap.first > overlap.second
-    // partial remove is ok if overlap.first < overlap.second
-    if (overlap.first == overlap.second) {
-      auto file = it->files[overlap.first];
-      if (ic.Compare(smallest, file->smallest()) > 0
-          && ic.Compare(largest, file->largest()) < 0) {
-        // output sst can't partial remove in middle ...
-        return false;
-      }
-    }
-  }
+  bool found = false;
   for (auto& level : *inputs) {
     if (level.level == 0) {
-      continue;
+      // bad case ...
+      return false;
     }
     if (level.files.empty()) {
       continue;
     }
     auto overlap = FindLevelOverlap(level.files, ic, smallest, largest);
     if (overlap.first > overlap.second) {
+      // none overlap
       continue;
+    } else if (level.level == output_level) {
+      // Make sure current output not full covered by single optput level sst
+      if (overlap.first == overlap.second) {
+        auto file = level.files[overlap.first];
+        if (ic.Compare(smallest, file->smallest()) > 0 &&
+          ic.Compare(largest, file->largest()) < 0) {
+          // output sst can't partial remove in middle ...
+          return false;
+        }
+      }
     }
     if (ic.Compare(level.files[overlap.first]->smallest(), smallest) < 0) {
       // can't cover left
@@ -1446,11 +1454,10 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
       --overlap.second;
     }
     if (overlap.first <= overlap.second) {
-      // found !
-      return true;
+      found = true;
     }
   }
-  return false;
+  return found;
 }
 
 Status CompactionJob::InstallCompactionResults(

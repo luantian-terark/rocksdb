@@ -25,9 +25,9 @@ struct CompactionInputFiles {
   inline void clear() { files.clear(); }
   inline FileMetaData* operator[](size_t i) const { return files[i]; }
 };
-// only seek(smallest) to seek_for_prev(largest) need compact
+// Input files limit to smallest .. largest (open interval)
 // allow range overlap with outout level
-// DISALLOW full covered by single optput level sst
+// DISALLOW FULL COVERED BY SINGLE OPTPUT LEVEL SST
 struct CompactionInputFilesRange {
   InternalKey smallest;
   InternalKey largest;
