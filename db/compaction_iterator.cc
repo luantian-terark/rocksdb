@@ -229,15 +229,21 @@ void CompactionIterator::NextFromInput() {
         CompactionFilter::Decision filter;
         compaction_filter_value_.clear();
         compaction_filter_skip_until_.Clear();
-        {
+        if (filter_sample_interval_ && filter_hit_count_ % filter_sample_interval_ == 0) {
           StopWatchNano timer(env_, true);
           filter = compaction_filter_->FilterV2(
               compaction_->level(), ikey_.user_key,
               CompactionFilter::ValueType::kValue, value_,
               &compaction_filter_value_, compaction_filter_skip_until_.rep());
           iter_stats_.total_filter_time +=
-              env_ != nullptr ? timer.ElapsedNanos() : 0;
+              env_ != nullptr ? timer.ElapsedNanos() * filter_sample_interval_ : 0;
+        } else {
+          filter = compaction_filter_->FilterV2(
+              compaction_->level(), ikey_.user_key,
+              CompactionFilter::ValueType::kValue, value_,
+              &compaction_filter_value_, compaction_filter_skip_until_.rep());
         }
+        ++filter_hit_count_;
 
         if (filter == CompactionFilter::Decision::kRemoveAndSkipUntil &&
             cmp_->Compare(*compaction_filter_skip_until_.rep(),
