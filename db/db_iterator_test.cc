@@ -13,6 +13,7 @@
 #include "port/port.h"
 #include "port/stack_trace.h"
 #include "rocksdb/iostats_context.h"
+#include "table/iterator_wrapper.h"
 #include "rocksdb/perf_context.h"
 
 namespace rocksdb {
@@ -2155,6 +2156,101 @@ TEST_F(DBIteratorTest, SkipStatistics) {
   // 3 deletes + 3 original keys + lower sequence of "a"
   skip_count += 7;
   ASSERT_EQ(skip_count, TestGetTickerCount(options, NUMBER_ITER_SKIP));
+}
+
+TEST_F(DBIteratorTest, RangeWrappedInternalIteratorTest) {
+  auto test = [](const std::vector<uint64_t>& values,
+                 const std::vector<uint64_t>& ranges,
+                 const std::vector<uint64_t>& valid) {
+    InternalKeyComparator ic(BytewiseComparator());
+    anon::TestInternalIterator value_iter(values);
+    std::vector<InternalKey> range_set;
+    range_set.reserve(ranges.size());
+    for (auto r : ranges) {
+      if (port::kLittleEndian) {
+        r = EndianTransform(r, 8);
+      }
+      range_set.emplace_back();
+      range_set.back().rep()->resize(16, 0);
+      memcpy(&*range_set.back().rep()->begin(), &r, 4);
+    }
+    auto iter = NewRangeWrappedInternalIterator(&value_iter, ic, &range_set, nullptr);
+    std::string key;
+    key.resize(16, 0);
+    iter->SeekToFirst();
+    for (auto it = valid.begin(); it != valid.end(); ++it) {
+      uint64_t value = *(const uint64_t*)iter->key().data();
+      if (port::kLittleEndian) {
+        value = EndianTransform(value, 8);
+      }
+      ASSERT_EQ(*it, value);
+      iter->Next();
+    }
+    ASSERT_FALSE(iter->Valid());
+    iter->SeekToLast();
+    for (auto it = valid.rbegin(); it != valid.rend(); ++it) {
+      uint64_t value = *(const uint64_t*)iter->key().data());
+      if (port::kLittleEndian) {
+        value = EndianTransform(value, 8);
+      }
+      ASSERT_EQ(*it, value);
+      iter->Prev();
+    }
+    ASSERT_FALSE(iter->Valid());
+    uint64_t smallest = std::min(values.front(), ranges.front()) - 1;
+    uint64_t largest = std::min(values.back(), ranges.back()) + 1;
+    for (uint64_t i = smallest; i <= largest; ++i) {
+      uint64_t ii = i;
+      if (port::kLittleEndian) {
+        ii = EndianTransform(ii, 8);
+      }
+      memcpy(&key[0], &ii, 4);
+      iter->Seek(key);
+      auto find1 = std::lower_bound(valid.begin(), valid.end(), i);
+      if (find1 == valid.end()) {
+        ASSERT_FALSE(iter->Valid());
+      }
+      else {
+        uint64_t value = *(const uint64_t*)iter->key().data());
+        if (port::kLittleEndian) {
+          value = EndianTransform(value, 8);
+        }
+        ASSERT_EQ(value, *find1);
+      }
+      auto find2 = std::upper_bound(valid.begin(), valid.end(), i);
+      iter->SeekForPrev(key);
+      if (find2 == valid.begin()) {
+        ASSERT_FALSE(iter->Valid());
+      }
+      else {
+        uint64_t value = *(const uint64_t*)iter->key().data());
+        if (port::kLittleEndian) {
+          value = EndianTransform(value, 8);
+        }
+        ASSERT_EQ(value, find2[-1]));
+      }
+    }
+  };
+  test(
+    { 2, 3, 4 },
+    { 1, 2, 4, 5 },
+    { 2, 4 }
+  );
+  test(
+    { 1, 3, 5 },
+    { 2, 4 },
+    { 3 }
+  );
+  test(
+    { 2, 4, 6 },
+    { 1, 3, 5, 7 },
+    { 2, 6 }
+  );
+  test(
+    { 2, 3, 5, 30 },
+    { 3, 4, 6, 6, 8, 10, 20, 40 },
+    { 3, 30 }
+  );
 }
 
 }  // namespace rocksdb
