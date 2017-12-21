@@ -46,6 +46,7 @@
 #include "rocksdb/table.h"
 #include "table/block.h"
 #include "table/block_based_table_factory.h"
+#include "table/iterator_wrapper.h"
 #include "table/merging_iterator.h"
 #include "table/table_builder.h"
 #include "util/coding.h"
@@ -200,26 +201,10 @@ struct PartialRemoveMetaData {
           table_reader->ApproximateOffsetOf(range_set[i + 1].Encode());
       alive_size += right_offset - left_offset;
     }
-    partial_removed = std::min<uint64_t>(100, std::max<uint64_t>(1,
+    partial_removed = std::min<uint64_t>(99, std::max<uint64_t>(1,
         (std::max(alive_size, sst_size) - alive_size) * 100 / sst_size));
   }
 };
-
-std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
-    const std::vector<FileMetaData*>& files,
-    const InternalKeyComparator& ic,
-    const InternalKey& smallest,
-    const InternalKey& largest) {
-  auto left = std::lower_bound(files.begin(), files.end(), smallest,
-      [&ic](const FileMetaData* l, const InternalKey& r) {
-    return ic.Compare(l->largest(), r) < 0;
-  });
-  auto right = std::upper_bound(files.begin(), files.end(), largest,
-      [&ic](const InternalKey& l, const FileMetaData* r) {
-    return ic.Compare(l, r->smallest()) < 0;
-  });
-  return std::make_pair(left - files.begin(), right - files.begin() - 1);
-}
 
 
 // Maintains state for each sub-compaction
@@ -845,6 +830,19 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   std::unique_ptr<InternalIterator> input(versions_->MakeInputIterator(
       sub_compact->compaction, range_del_agg.get(), env_optiosn_for_read_));
 
+  if (sub_compact->compaction->input_range() != nullptr) {
+    auto range_set = new std::vector<InternalKey>;
+    range_set->emplace_back(sub_compact->compaction->input_range()->smallest);
+    range_set->emplace_back(sub_compact->compaction->input_range()->largest);
+    auto wrapper = NewRangeWrappedInternalIterator(
+                       input.release(), cfd->ioptions()->internal_comparator,
+                       range_set, nullptr);
+    wrapper->RegisterCleanup([](void* arg1, void* arg2) {
+      delete reinterpret_cast<std::vector<InternalKey>*>(arg1);
+    }, range_set, nullptr);
+    input.reset(wrapper);
+  }
+
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_COMPACTION_PROCESS_KV);
 
@@ -1091,8 +1089,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
           sub_compact->compression_dict = std::move(dict_sample_data);
         }
       }
-      if (sub_compact->compaction->immutable_cf_options()->enable_partial_remove
-          && next_key && ShouldFinishCompaction(sub_compact, *next_key)) {
+      if (sub_compact->compaction->enable_partial_remove() && next_key &&
+          ShouldFinishCompaction(sub_compact, *next_key)) {
         sub_compact->partial_remove_info.active = true;
         break;
       }
@@ -1483,19 +1481,28 @@ Status CompactionJob::InstallCompactionResults(
 
   // Add compaction outputs
   compaction->AddInputDeletions(compact_->compaction->edit());
-  if (std::find_if(compact_->sub_compact_states.begin(),
-      compact_->sub_compact_states.end(),
-      [](const CompactionJob::SubcompactionState& s) {
-    return s.partial_remove_info.active;
-  }) != compact_->sub_compact_states.end()) {
-    auto inputs = compaction->inputs();
-    auto& ic = compaction->column_family_data()->internal_comparator();
 
-    std::vector<InternalKey> erase_set;
+  auto& ic = compaction->column_family_data()->internal_comparator();
+  std::vector<InternalKey> erase_set;
+  // find partial remove actived
+  if (std::find_if(compact_->sub_compact_states.begin(),
+                   compact_->sub_compact_states.end(),
+                   [](const CompactionJob::SubcompactionState& s) {
+                       return s.partial_remove_info.active;
+                   }) != compact_->sub_compact_states.end()) {
     for (const auto& sub_compact : compact_->sub_compact_states) {
       erase_set.emplace_back(sub_compact.partial_remove_info.smallest);
       erase_set.emplace_back(sub_compact.partial_remove_info.largest);
     }
+  }
+  // if input range used
+  if (erase_set.empty() && compact_->compaction->input_range() != nullptr) {
+    erase_set.emplace_back(compact_->compaction->input_range()->smallest);
+    erase_set.emplace_back(compact_->compaction->input_range()->largest);
+  }
+  if (!erase_set.empty()) {
+    // reclaim input sst
+    auto inputs = compaction->inputs();
     for (auto& level : *inputs) {
       for (auto& file : level.files) {
         PartialRemoveMetaData meta(file, erase_set, ic);

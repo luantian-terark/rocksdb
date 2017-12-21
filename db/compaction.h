@@ -25,6 +25,13 @@ struct CompactionInputFiles {
   inline void clear() { files.clear(); }
   inline FileMetaData* operator[](size_t i) const { return files[i]; }
 };
+// only seek(smallest) to seek_for_prev(largest) need compact
+// allow range overlap with outout level
+// DISALLOW full covered by single optput level sst
+struct CompactionInputFilesRange {
+  InternalKey smallest;
+  InternalKey largest;
+};
 
 class Version;
 class ColumnFamilyData;
@@ -42,7 +49,8 @@ class Compaction {
              uint32_t output_path_id, CompressionType compression,
              std::vector<FileMetaData*> grandparents,
              bool manual_compaction = false, double score = -1,
-             bool deletion_compaction = false,
+             bool deletion_compaction = false, bool enable_partial_remove = false,
+             const CompactionInputFilesRange* input_range = nullptr,
              CompactionReason compaction_reason = CompactionReason::kUnknown);
 
   // No copying allowed
@@ -127,6 +135,14 @@ class Compaction {
 
   // If true, then the compaction can be done by simply deleting input files.
   bool deletion_compaction() const { return deletion_compaction_; }
+
+  // If true, compaction should break when some input sst can remove
+  bool enable_partial_remove() const { return enable_partial_remove_; }
+
+  // See CompactionInputFilesRange declare above
+  const CompactionInputFilesRange* input_range() const {
+    return input_range_;
+  };
 
   // Add all inputs to this compaction as delete operations to *edit.
   void AddInputDeletions(VersionEdit* edit);
@@ -280,6 +296,12 @@ class Compaction {
   // If true, then the comaction can be done by simply deleting input files.
   const bool deletion_compaction_;
 
+  // If true, compaction should break when some input sst can remove
+  const bool enable_partial_remove_;
+
+  // See CompactionInputFilesRange declare above
+  const CompactionInputFilesRange* input_range_;
+
   // Compaction input files organized by level. Constant after construction
   const std::vector<CompactionInputFiles> inputs_;
 
@@ -321,5 +343,10 @@ class Compaction {
 
 // Utility function
 extern uint64_t TotalFileSize(const std::vector<FileMetaData*>& files);
+std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
+    const std::vector<FileMetaData*>& files,
+    const InternalKeyComparator& ic,
+    const InternalKey& smallest,
+    const InternalKey& largest);
 
 }  // namespace rocksdb

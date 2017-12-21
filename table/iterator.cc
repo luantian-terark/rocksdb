@@ -15,6 +15,10 @@
 
 namespace rocksdb {
 
+// range_set are sorted
+// for (int i = 0; i < size / 2; ++i)
+//   range_set[2 * i] .. range_set[2 * i + 1] is open interval
+// all ranges non overlap
 class RangeWrappedInternalIterator : public InternalIterator {
 public:
   RangeWrappedInternalIterator(
@@ -48,7 +52,7 @@ public:
   }
   void Seek(const Slice& target) override final {
     Slice s = target;
-    while(true) {
+    while (true) {
       iter_->Seek(s);
       if (!iter_->Valid()) {
         break;
@@ -56,8 +60,8 @@ public:
       auto find = std::upper_bound(
           range_set_->begin(), range_set_->end(),
           iter_->key(), [this](const Slice& l, const InternalKey& r) {
-        return ic_.Compare(l, r.Encode()) < 0;
-      });
+                            return ic_.Compare(l, r.Encode()) < 0;
+                        });
       if ((find - range_set_->begin()) % 2 == 1) {
         largest_ = &*find;
         smallest_ = largest_ - 1;
@@ -68,7 +72,7 @@ public:
         SeekToFirst();
         break;
       }
-      largest_ = &*(find - 1);
+      largest_ = &find[-1];
       if (ic_.Compare(iter_->key(), largest_->Encode()) == 0) {
         smallest_ = largest_ - 1;
         invalid_ = false;
@@ -78,7 +82,7 @@ public:
         invalid_ = true;
         break;
       }
-      s = (largest_ + 1)->Encode();
+      s = largest_[1].Encode();
     }
     assert(!Valid() ||
            (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0 &&
@@ -94,8 +98,8 @@ public:
       auto find = std::upper_bound(
           range_set_->rbegin(), range_set_->rend(),
           iter_->key(), [this](const Slice& l, const InternalKey& r) {
-        return ic_.Compare(l, r.Encode()) > 0;
-      });
+                            return ic_.Compare(l, r.Encode()) > 0;
+                        });
       if ((find - range_set_->rbegin()) % 2 == 1) {
         smallest_ = &*find;
         largest_ = smallest_ + 1;
@@ -106,7 +110,7 @@ public:
         SeekToLast();
         break;
       }
-      smallest_ = &*(find - 1);
+      smallest_ = &find[-1];
       if (ic_.Compare(iter_->key(), smallest_->Encode()) == 0) {
         largest_ = smallest_ + 1;
         invalid_ = false;
@@ -116,7 +120,7 @@ public:
         invalid_ = true;
         break;
       }
-      s = (smallest_ - 1)->Encode();
+      s = smallest_[-1].Encode();
     }
     assert(!Valid() ||
            (ic_.Compare(smallest_->Encode(), iter_->key()) <= 0 &&

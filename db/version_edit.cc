@@ -276,7 +276,7 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
           f.range_set.emplace_back();
           f.range_set.back().DecodeFrom(field);
           if (!f.range_set.back().Valid()) {
-            return "hole_set field invalid internal key";
+            return "range_set field invalid internal key";
           }
         default:
           if ((custom_tag & kCustomTagNonSafeIgnoreMask) != 0) {

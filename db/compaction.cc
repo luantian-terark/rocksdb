@@ -31,6 +31,24 @@ uint64_t TotalFileSize(const std::vector<FileMetaData*>& files) {
   return sum;
 }
 
+std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
+    const std::vector<FileMetaData*>& files,
+    const InternalKeyComparator& ic,
+    const InternalKey& smallest,
+    const InternalKey& largest) {
+  auto left = std::lower_bound(
+                  files.begin(), files.end(), smallest,
+                  [&ic](const FileMetaData* l, const InternalKey& r) {
+                      return ic.Compare(l->largest(), r) < 0;
+                  });
+  auto right = std::upper_bound(
+                   files.begin(), files.end(), largest,
+                   [&ic](const InternalKey& l, const FileMetaData* r) {
+                       return ic.Compare(l, r->smallest()) < 0;
+                   });
+  return std::make_pair(left - files.begin(), right - files.begin() - 1);
+}
+
 void Compaction::SetInputVersion(Version* _input_version) {
   input_version_ = _input_version;
   cfd_ = input_version_->cfd();
@@ -136,7 +154,8 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
                        CompressionType _compression,
                        std::vector<FileMetaData*> _grandparents,
                        bool _manual_compaction, double _score,
-                       bool _deletion_compaction,
+                       bool _deletion_compaction, bool _enable_partial_remove,
+                       const CompactionInputFilesRange* _input_range,
                        CompactionReason _compaction_reason)
     : input_vstorage_(vstorage),
       start_level_(_inputs[0].level),
@@ -151,6 +170,8 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
       output_path_id_(_output_path_id),
       output_compression_(_compression),
       deletion_compaction_(_deletion_compaction),
+      enable_partial_remove_(_enable_partial_remove),
+      input_range_(_input_range),
       inputs_(std::move(_inputs)),
       grandparents_(std::move(_grandparents)),
       score_(_score),
@@ -164,9 +185,22 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
     compaction_reason_ = CompactionReason::kManualCompaction;
   }
 
+  auto &ic = immutable_cf_options_.internal_comparator;
 #ifndef NDEBUG
   for (size_t i = 1; i < inputs_.size(); ++i) {
     assert(inputs_[i].level > inputs_[i - 1].level);
+
+    if (input_range_ != nullptr && inputs_[i].level == output_level_) {
+      // Make sure input_range not full covered by single optput level sst
+      auto overlap = FindLevelOverlap(inputs_[i].files, ic,
+                                      input_range_->smallest,
+                                      input_range_->largest);
+      if (overlap.first == overlap.second) {
+        auto file = inputs_[i].files[overlap.first];
+        assert (ic.Compare(input_range_->smallest, file->smallest()) <= 0
+          || ic.Compare(input_range_->largest, file->largest()) >= 0);
+      }
+    }
   }
 #endif
 
@@ -180,6 +214,14 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
   }
 
   GetBoundaryKeys(vstorage, inputs_, &smallest_user_key_, &largest_user_key_);
+  if (input_range_ != nullptr) {
+    if (ic.Compare(smallest_user_key_, input_range_->smallest.user_key()) < 0) {
+      smallest_user_key_ = input_range_->smallest.user_key();
+    }
+    if (ic.Compare(largest_user_key_, input_range_->largest.user_key()) > 0) {
+      largest_user_key_ = input_range_->largest.user_key();
+    }
+  }
 }
 
 Compaction::~Compaction() {

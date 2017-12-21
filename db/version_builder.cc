@@ -346,6 +346,7 @@ class VersionBuilder::Rep {
                          base_files.end());
       if (add_files_num > 0) {
         if (!base_files.empty()) {
+          // Make sure added files in front
           std::stable_sort(added_files.begin(), added_files.end(),
                            FileNumberComparator());
           auto end = std::unique(added_files.begin(), added_files.end(),
