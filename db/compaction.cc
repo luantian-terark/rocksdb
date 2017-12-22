@@ -171,7 +171,8 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
       output_compression_(_compression),
       deletion_compaction_(_deletion_compaction),
       enable_partial_remove_(_enable_partial_remove),
-      input_range_(_input_range),
+      enable_input_range_(!!_input_range),
+      input_range_(_input_range ? *_input_range : CompactionInputFilesRange()),
       inputs_(std::move(_inputs)),
       grandparents_(std::move(_grandparents)),
       score_(_score),
@@ -190,16 +191,16 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
   for (size_t i = 1; i < inputs_.size(); ++i) {
     assert(inputs_[i].level > inputs_[i - 1].level);
 
-    if (input_range_ != nullptr && inputs_[i].level == output_level_) {
-      assert(ic.Compare(input_range_->smallest, input_range_->largest) < 0);
+    if (enable_input_range_ && inputs_[i].level == output_level_) {
+      assert(ic.Compare(input_range_.smallest, input_range_.largest) < 0);
       // Make sure input_range not full covered by single optput level sst
       auto overlap = FindLevelOverlap(inputs_[i].files, ic,
-                                      input_range_->smallest,
-                                      input_range_->largest);
+                                      input_range_.smallest,
+                                      input_range_.largest);
       if (overlap.first == overlap.second) {
         auto file = inputs_[i].files[overlap.first];
-        assert (ic.Compare(input_range_->smallest, file->smallest()) <= 0
-          || ic.Compare(input_range_->largest, file->largest()) >= 0);
+        assert (ic.Compare(input_range_.smallest, file->smallest()) <= 0
+          || ic.Compare(input_range_.largest, file->largest()) >= 0);
       }
     }
   }
@@ -216,12 +217,12 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
 
   GetBoundaryKeys(vstorage, inputs_, &smallest_user_key_, &largest_user_key_);
   // shrink to input range
-  if (input_range_ != nullptr) {
-    if (ic.Compare(smallest_user_key_, input_range_->smallest.user_key()) < 0) {
-      smallest_user_key_ = input_range_->smallest.user_key();
+  if (enable_input_range_) {
+    if (ic.Compare(smallest_user_key_, input_range_.smallest.user_key()) < 0) {
+      smallest_user_key_ = input_range_.smallest.user_key();
     }
-    if (ic.Compare(largest_user_key_, input_range_->largest.user_key()) > 0) {
-      largest_user_key_ = input_range_->largest.user_key();
+    if (ic.Compare(largest_user_key_, input_range_.largest.user_key()) > 0) {
+      largest_user_key_ = input_range_.largest.user_key();
     }
   }
 }

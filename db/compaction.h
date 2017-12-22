@@ -141,7 +141,7 @@ class Compaction {
 
   // See CompactionInputFilesRange declare above
   const CompactionInputFilesRange* input_range() const {
-    return input_range_;
+    return enable_input_range_ ? &input_range_ : nullptr;
   };
 
   // Add all inputs to this compaction as delete operations to *edit.
@@ -300,7 +300,8 @@ class Compaction {
   const bool enable_partial_remove_;
 
   // See CompactionInputFilesRange declare above
-  const CompactionInputFilesRange* input_range_;
+  const bool enable_input_range_;
+  const CompactionInputFilesRange input_range_;
 
   // Compaction input files organized by level. Constant after construction
   const std::vector<CompactionInputFiles> inputs_;

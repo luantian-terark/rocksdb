@@ -969,11 +969,13 @@ class LevelCompactionBuilder {
         vstorage_(vstorage),
         compaction_picker_(compaction_picker),
         log_buffer_(log_buffer),
+        enable_partial_remove_(ioptions.enable_partial_remove),
         mutable_cf_options_(mutable_cf_options),
         ioptions_(ioptions) {}
 
   // Pick and return a compaction.
   Compaction* PickCompaction();
+  Compaction* PickCompactionPartialRemove();
 
   // Pick the initial files to compact to the next level. (or together
   // in Intra-L0 compactions)
@@ -1020,7 +1022,10 @@ class LevelCompactionBuilder {
   int base_index_ = -1;
   double start_level_score_ = 0;
   bool is_manual_ = false;
+  bool enable_partial_remove_ = false;
+  bool enable_input_range_ = false;
   CompactionInputFiles start_level_inputs_;
+  CompactionInputFilesRange input_range_;
   std::vector<CompactionInputFiles> compaction_inputs_;
   CompactionInputFiles output_level_inputs_;
   std::vector<FileMetaData*> grandparents_;
@@ -1255,6 +1260,41 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   return c;
 }
 
+Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
+  // uncompleted ... use default
+  if (true || vstorage_->num_levels() < 3) {
+    enable_partial_remove_ = false;
+    return PickCompaction();
+  }
+  auto& lv0 = vstorage_->LevelFiles(0);
+  auto& lv1 = vstorage_->LevelFiles(1);
+  auto& lv2 = vstorage_->LevelFiles(2);
+  if (compaction_picker_->level0_compactions_in_progress()->empty()) {
+    if (lv0.size() >= mutable_cf_options_.level0_file_num_compaction_trigger) {
+      if (std::find_if(lv1.begin(), lv1.end(), [](const FileMetaData* meta) {
+        return meta->being_compacted;
+      }) == lv1.end()) {
+        CompactionInputFiles files;
+        files.level = 0;
+        files.files = lv0;
+        compaction_inputs_.emplace_back(std::move(files));
+        if (!lv1.empty()) {
+          files.level = 1;
+          files.files = lv1;
+          compaction_inputs_.emplace_back(std::move(files));
+        }
+        output_level_ = 1;
+        enable_partial_remove_ = false;
+        return GetCompaction();
+      }
+    }
+  }
+  else {
+    (void)lv2;
+  }
+  return nullptr;
+}
+
 Compaction* LevelCompactionBuilder::GetCompaction() {
   auto c = new Compaction(
       vstorage_, ioptions_, mutable_cf_options_, std::move(compaction_inputs_),
@@ -1264,8 +1304,8 @@ Compaction* LevelCompactionBuilder::GetCompaction() {
       GetCompressionType(ioptions_, vstorage_, mutable_cf_options_,
                          output_level_, vstorage_->base_level()),
       std::move(grandparents_), is_manual_, start_level_score_,
-      false /* deletion_compaction */, ioptions_.enable_partial_remove,
-      nullptr, compaction_reason_);
+      false /* deletion_compaction */, enable_partial_remove_,
+      enable_input_range_ ? &input_range_ : nullptr, compaction_reason_);
 
   // If it's level 0 compaction, make sure we don't execute any other level 0
   // compactions in parallel
@@ -1429,6 +1469,9 @@ Compaction* LevelCompactionPicker::PickCompaction(
     VersionStorageInfo* vstorage, LogBuffer* log_buffer) {
   LevelCompactionBuilder builder(cf_name, vstorage, this, log_buffer,
                                  mutable_cf_options, ioptions_);
+  if (ioptions_.enable_partial_remove) {
+    return builder.PickCompactionPartialRemove();
+  }
   return builder.PickCompaction();
 }
 
