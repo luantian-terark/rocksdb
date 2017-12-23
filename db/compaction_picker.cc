@@ -1262,35 +1262,101 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
 
 Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
   // uncompleted ... use default
-  if (true || vstorage_->num_levels() < 3) {
+  if (true || vstorage_->num_levels() < 2) {
     enable_partial_remove_ = false;
     return PickCompaction();
   }
+  auto& ic = ioptions_.internal_comparator;
   auto& lv0 = vstorage_->LevelFiles(0);
   auto& lv1 = vstorage_->LevelFiles(1);
-  auto& lv2 = vstorage_->LevelFiles(2);
+  int start_level = 1;
   if (compaction_picker_->level0_compactions_in_progress()->empty()) {
     if (lv0.size() >= mutable_cf_options_.level0_file_num_compaction_trigger) {
-      if (std::find_if(lv1.begin(), lv1.end(), [](const FileMetaData* meta) {
-        return meta->being_compacted;
-      }) == lv1.end()) {
+      bool being_compacted = false;
+      for (auto meta : lv0) {
+        if (meta->being_compacted) {
+          being_compacted = true;
+          break;
+        }
+        if (!input_range_.smallest.Valid() ||
+            ic.Compare(meta->smallest(), input_range_.smallest) < 0) {
+          input_range_.smallest = meta->smallest();
+        }
+        if (!input_range_.largest.Valid() ||
+            ic.Compare(meta->largest(), input_range_.largest) > 0) {
+          input_range_.largest = meta->largest();
+        }
+      }
+      if (!being_compacted) {
         CompactionInputFiles files;
         files.level = 0;
         files.files = lv0;
         compaction_inputs_.emplace_back(std::move(files));
         if (!lv1.empty()) {
           files.level = 1;
-          files.files = lv1;
-          compaction_inputs_.emplace_back(std::move(files));
+          files.files.clear();
+          auto overlap = FindLevelOverlap(lv1, ic, input_range_.smallest,
+                                          input_range_.largest);
+          if (overlap.first <= overlap.second) {
+            for (ptrdiff_t i = overlap.first; i <= overlap.second; ++i) {
+              files.files.emplace_back(lv1[i]);
+            }
+            compaction_inputs_.emplace_back(std::move(files));
+            enable_input_range_ = true;
+            if (overlap.first == overlap.second) {
+              auto file = lv1[overlap.first];
+              if (ic.Compare(input_range_.smallest, file->smallest()) > 0 &&
+                  ic.Compare(input_range_.largest, file->largest()) < 0) {
+                enable_input_range_ = false;
+              }
+            }
+          }
         }
         output_level_ = 1;
         enable_partial_remove_ = false;
         return GetCompaction();
       }
+      start_level = 2;
+      input_range_.smallest.Clear();
+      input_range_.largest.Clear();
     }
   }
-  else {
-    (void)lv2;
+  std::vector<size_t> level_size;
+  level_size.resize(vstorage_->num_levels(), 0);
+  for (int i = start_level; i < vstorage_->num_levels(); ++i) {
+    for (auto meta : vstorage_->LevelFiles(i)) {
+      level_size[i] += meta->fd.file_size * (100 - meta->partial_removed) / 100;
+    }
+  }
+  double m = mutable_cf_options_.max_bytes_for_level_multiplier;
+  double top_ratio = 0;
+  double bottom_ratio = 0;
+  int top_level = 0;
+  int bottom_level = 0;
+  for (int i = start_level; i < vstorage_->num_levels() - 1; ++i) {
+    if (level_size[i] * m >= level_size[i + 1]) {
+      top_ratio = double(level_size[i]) / std::max<size_t>(1, level_size[i + 1]);
+      top_level = i;
+      break;
+    }
+  }
+  for (int i = vstorage_->num_levels() - 1; i >= start_level + 1; --i) {
+    if (level_size[i - 1] * m >= level_size[i]) {
+      bottom_ratio = double(level_size[i - 1]) / std::max<size_t>(1, level_size[i]);
+      bottom_level = i;
+      break;
+    }
+  }
+  if (top_ratio > bottom_ratio && top_level != 0) {
+    FileMetaData* input_meta = nullptr;
+    std::pair<ptrdiff_t, ptrdiff_t> input_overlap;
+    for (auto meta : vstorage_->LevelFiles(top_level)) {
+      (void)meta;
+      (void)input_overlap;
+      (void)input_meta;
+    }
+  } else if (bottom_level != 0) {
+
   }
   return nullptr;
 }
