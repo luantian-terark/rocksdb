@@ -842,11 +842,12 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   std::unique_ptr<InternalIterator> input(versions_->MakeInputIterator(
       sub_compact->compaction, range_del_agg.get(), env_optiosn_for_read_));
 
-  // limit input in input_range
+  // limit input to input_range
   if (sub_compact->compaction->input_range() != nullptr) {
+    auto input_range = sub_compact->compaction->input_range();
     auto range_set = new std::vector<InternalKey>;
-    range_set->emplace_back(sub_compact->compaction->input_range()->smallest);
-    range_set->emplace_back(sub_compact->compaction->input_range()->largest);
+    range_set->emplace_back(input_range->smallest);
+    range_set->emplace_back(input_range->largest);
     auto wrapper = NewRangeWrappedInternalIterator(
                        input.release(), cfd->ioptions()->internal_comparator,
                        range_set, nullptr);
@@ -929,7 +930,9 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   } else {
     input->SeekToFirst();
   }
-  sub_compact->partial_remove_info.smallest.DecodeFrom(input->key());
+  if (input->Valid()) {
+    sub_compact->partial_remove_info.smallest.DecodeFrom(input->key());
+  }
 
   // we allow only 1 compaction event listener. Used by blob storage
   CompactionEventListener* comp_event_listener = nullptr;
@@ -1167,7 +1170,9 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     } else {
       input->SeekToLast();
     }
-    sub_compact->partial_remove_info.largest.DecodeFrom(input->key());
+    if (input->Valid()) {
+      sub_compact->partial_remove_info.largest.DecodeFrom(input->key());
+    }
   }
 
   if (measure_io_stats_) {
@@ -1497,13 +1502,20 @@ Status CompactionJob::InstallCompactionResults(
                    [](const CompactionJob::SubcompactionState& s) {
                        return s.partial_remove_info.active;
                    }) != compact_->sub_compact_states.end()) {
-    for (const auto& sub_compact : compact_->sub_compact_states) {
-      erase_set.emplace_back(sub_compact.partial_remove_info.smallest);
-      erase_set.emplace_back(sub_compact.partial_remove_info.largest);
+    for (const auto& s : compact_->sub_compact_states) {
+      if (!s.partial_remove_info.smallest.Encode().empty() && 
+          !s.partial_remove_info.largest.Encode().empty()) {
+        erase_set.emplace_back(s.partial_remove_info.smallest);
+        erase_set.emplace_back(s.partial_remove_info.largest);
+      } else {
+        // this sub compact empty ...
+        assert(s.partial_remove_info.smallest.Encode().empty());
+        assert(s.partial_remove_info.largest.Encode().empty());
+      }
     }
   }
   // if input range used
-  if (erase_set.empty() && compact_->compaction->input_range() != nullptr) {
+  if (erase_set.empty() && compaction->input_range() != nullptr) {
     erase_set.emplace_back(compact_->compaction->input_range()->smallest);
     erase_set.emplace_back(compact_->compaction->input_range()->largest);
   }

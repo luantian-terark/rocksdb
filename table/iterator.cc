@@ -17,7 +17,7 @@ namespace rocksdb {
 
 // range_set are sorted
 // for (int i = 0; i < size / 2; ++i)
-//   range_set[2 * i] .. range_set[2 * i + 1] is open interval
+//   range_set[2 * i] .. range_set[2 * i + 1] is closed interval
 // all ranges non overlap
 class RangeWrappedInternalIterator : public InternalIterator {
 public:

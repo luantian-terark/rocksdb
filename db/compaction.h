@@ -344,7 +344,8 @@ class Compaction {
 
 // Utility function
 extern uint64_t TotalFileSize(const std::vector<FileMetaData*>& files);
-std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
+
+extern std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
     const std::vector<FileMetaData*>& files,
     const InternalKeyComparator& ic,
     const InternalKey& smallest,
