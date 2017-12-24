@@ -34,19 +34,25 @@ uint64_t TotalFileSize(const std::vector<FileMetaData*>& files) {
 std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
     const std::vector<FileMetaData*>& files,
     const InternalKeyComparator& ic,
-    const InternalKey& smallest,
-    const InternalKey& largest) {
-  auto left = std::lower_bound(
-                  files.begin(), files.end(), smallest,
-                  [&ic](const FileMetaData* l, const InternalKey& r) {
-                      return ic.Compare(l->largest(), r) < 0;
-                  });
-  auto right = std::upper_bound(
-                   files.begin(), files.end(), largest,
-                   [&ic](const InternalKey& l, const FileMetaData* r) {
-                       return ic.Compare(l, r->smallest()) < 0;
-                   });
-  return std::make_pair(left - files.begin(), right - files.begin() - 1);
+    const InternalKey* smallest,
+    const InternalKey* largest) {
+  ptrdiff_t left = 0;
+  ptrdiff_t right = (ptrdiff_t)files.size() - 1;
+  if (smallest != nullptr) {
+    left = std::lower_bound(
+               files.begin(), files.end(), *smallest,
+               [&ic](const FileMetaData* l, const InternalKey& r) {
+                   return ic.Compare(l->largest(), r) < 0;
+               }) - files.begin();
+  }
+  if (largest != nullptr) {
+    right = std::upper_bound(
+                files.begin(), files.end(), *largest,
+                [&ic](const InternalKey& l, const FileMetaData* r) {
+                    return ic.Compare(l, r->smallest()) < 0;
+                }) - files.begin() - 1;
+  }
+  return std::make_pair(left, right);
 }
 
 void Compaction::SetInputVersion(Version* _input_version) {
@@ -190,19 +196,6 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
 #ifndef NDEBUG
   for (size_t i = 1; i < inputs_.size(); ++i) {
     assert(inputs_[i].level > inputs_[i - 1].level);
-
-    if (enable_input_range_ && inputs_[i].level == output_level_) {
-      assert(ic.Compare(input_range_.smallest, input_range_.largest) < 0);
-      // Make sure input_range not full covered by single optput level sst
-      auto overlap = FindLevelOverlap(inputs_[i].files, ic,
-                                      input_range_.smallest,
-                                      input_range_.largest);
-      if (overlap.first == overlap.second) {
-        auto file = inputs_[i].files[overlap.first];
-        assert (ic.Compare(input_range_.smallest, file->smallest()) <= 0
-          || ic.Compare(input_range_.largest, file->largest()) >= 0);
-      }
-    }
   }
 #endif
 
@@ -218,11 +211,15 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
   GetBoundaryKeys(vstorage, inputs_, &smallest_user_key_, &largest_user_key_);
   // shrink to input range
   if (enable_input_range_) {
-    if (ic.Compare(smallest_user_key_, input_range_.smallest.user_key()) < 0) {
-      smallest_user_key_ = input_range_.smallest.user_key();
+    if (input_range_.smallest != nullptr &&
+        ic.Compare(smallest_user_key_,
+                   input_range_.smallest->user_key()) < 0) {
+      smallest_user_key_ = input_range_.smallest->user_key();
     }
-    if (ic.Compare(largest_user_key_, input_range_.largest.user_key()) > 0) {
-      largest_user_key_ = input_range_.largest.user_key();
+    if (input_range_.largest != nullptr &&
+        ic.Compare(largest_user_key_,
+                   input_range_.largest->user_key()) > 0) {
+      largest_user_key_ = input_range_.largest->user_key();
     }
   }
 }

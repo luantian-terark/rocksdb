@@ -28,9 +28,16 @@ struct CompactionInputFiles {
 // Input files limit to smallest .. largest (open interval)
 // allow range overlap with outout level
 // DISALLOW FULL COVERED BY SINGLE OPTPUT LEVEL SST
+// smallest & largest are internal keys
 struct CompactionInputFilesRange {
-  InternalKey smallest;
-  InternalKey largest;
+  const InternalKey* smallest = nullptr;
+  const InternalKey* largest = nullptr;
+  enum RangeFlag : uint64_t {
+    kEmptyFlag      = 0,
+    kSmallestOpen   = 1 << 0,
+    kLargestOpen    = 1 << 1,
+  };
+  uint64_t flags = kEmptyFlag;
 };
 
 class Version;
@@ -348,7 +355,7 @@ extern uint64_t TotalFileSize(const std::vector<FileMetaData*>& files);
 extern std::pair<ptrdiff_t, ptrdiff_t> FindLevelOverlap(
     const std::vector<FileMetaData*>& files,
     const InternalKeyComparator& ic,
-    const InternalKey& smallest,
-    const InternalKey& largest);
+    const InternalKey* smallest,
+    const InternalKey* largest);
 
 }  // namespace rocksdb

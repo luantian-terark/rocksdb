@@ -601,13 +601,17 @@ void CompactionJob::GenSubcompactionBoundaries() {
   }
   auto input_range = c->input_range();
   if (input_range != nullptr) {
-    auto &ic = cfd->ioptions()->internal_comparator;
+    auto uc = cfd->user_comparator();
     for (auto& bound : bounds) {
-      if (ic.Compare(ExtractUserKey(bound), input_range->smallest.user_key()) < 0) {
-        bound = input_range->smallest.Encode();
+      if (input_range->smallest != nullptr &&
+          uc->Compare(ExtractUserKey(bound),
+                      input_range->smallest->user_key()) < 0) {
+        bound = input_range->smallest->Encode();
       }
-      if (ic.Compare(ExtractUserKey(bound), input_range->largest.user_key()) > 0) {
-        bound = input_range->largest.Encode();
+      if (input_range->largest != nullptr &&
+          uc->Compare(ExtractUserKey(bound),
+                      input_range->largest->user_key()) > 0) {
+        bound = input_range->largest->Encode();
       }
     }
   }
@@ -842,19 +846,47 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   std::unique_ptr<InternalIterator> input(versions_->MakeInputIterator(
       sub_compact->compaction, range_del_agg.get(), env_optiosn_for_read_));
 
-  // limit input to input_range
+  // apply input_range
   if (sub_compact->compaction->input_range() != nullptr) {
+    typedef CompactionInputFilesRange::RangeFlag RangeFlag;
     auto input_range = sub_compact->compaction->input_range();
     auto range_set = new std::vector<InternalKey>;
-    range_set->emplace_back(input_range->smallest);
-    range_set->emplace_back(input_range->largest);
-    auto wrapper = NewRangeWrappedInternalIterator(
-                       input.release(), cfd->ioptions()->internal_comparator,
-                       range_set, nullptr);
-    wrapper->RegisterCleanup([](void* arg1, void* arg2) {
-      delete reinterpret_cast<std::vector<InternalKey>*>(arg1);
-    }, range_set, nullptr);
-    input.reset(wrapper);
+    range_set->resize(2);
+    std::vector<InternalKey> erase_set;
+    if (input_range->smallest != nullptr) {
+      range_set->front() = *input_range->smallest;
+      if (input_range->flags & RangeFlag::kSmallestOpen) {
+        erase_set.resize(erase_set.size() + 2, *input_range->smallest);
+      }
+    } else {
+      input->SeekToFirst();
+      range_set->front().DecodeFrom(input->key());
+    }
+    if (input_range->largest != nullptr) {
+      range_set->back() = *input_range->largest;
+      if (input_range->flags & RangeFlag::kLargestOpen) {
+        erase_set.resize(erase_set.size() + 2, *input_range->largest);
+      }
+    } else {
+      input->SeekToLast();
+      range_set->back().DecodeFrom(input->key());
+    }
+    if (!erase_set.empty()) {
+      MergeRangeSet(*range_set, erase_set,
+                    cfd->ioptions()->internal_comparator, input.get());
+    }
+    if (range_set->empty()) {
+      delete range_set;
+      input.reset(NewEmptyInternalIterator());
+    } else {
+      auto wrapper = NewRangeWrappedInternalIterator(
+                         input.release(), cfd->ioptions()->internal_comparator,
+                         range_set, nullptr);
+      wrapper->RegisterCleanup([](void* arg1, void* arg2) {
+        delete reinterpret_cast<std::vector<InternalKey>*>(arg1);
+      }, range_set, nullptr);
+      input.reset(wrapper);
+    }
   }
 
   AutoThreadOperationStageUpdater stage_updater(
@@ -1435,7 +1467,7 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
     if (level.files.empty()) {
       continue;
     }
-    auto overlap = FindLevelOverlap(level.files, ic, smallest, largest);
+    auto overlap = FindLevelOverlap(level.files, ic, &smallest, &largest);
     if (overlap.first > overlap.second) {
       // none overlap
       continue;
@@ -1444,7 +1476,7 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
       if (overlap.first == overlap.second) {
         auto file = level.files[overlap.first];
         if (ic.Compare(smallest, file->smallest()) > 0 &&
-          ic.Compare(largest, file->largest()) < 0) {
+            ic.Compare(largest, file->largest()) < 0) {
           // output sst can't partial remove in middle ...
           return false;
         }
@@ -1496,8 +1528,9 @@ Status CompactionJob::InstallCompactionResults(
 
   auto& ic = compaction->column_family_data()->internal_comparator();
   std::vector<InternalKey> erase_set;
-  // find partial remove actived
-  if (std::find_if(compact_->sub_compact_states.begin(),
+  // collect partial remove info
+  if (compaction->input_range() != nullptr ||
+      std::find_if(compact_->sub_compact_states.begin(),
                    compact_->sub_compact_states.end(),
                    [](const CompactionJob::SubcompactionState& s) {
                        return s.partial_remove_info.active;
@@ -1514,11 +1547,6 @@ Status CompactionJob::InstallCompactionResults(
       }
     }
   }
-  // if input range used
-  if (erase_set.empty() && compaction->input_range() != nullptr) {
-    erase_set.emplace_back(compact_->compaction->input_range()->smallest);
-    erase_set.emplace_back(compact_->compaction->input_range()->largest);
-  }
   if (!erase_set.empty()) {
     // reclaim input sst
     auto inputs = compaction->inputs();
@@ -1530,7 +1558,8 @@ Status CompactionJob::InstallCompactionResults(
               level.level, file->fd.GetNumber(),
               file->fd.GetPathId(), file->fd.GetFileSize(), meta.range_set,
               file->smallest_seqno, file->largest_seqno,
-              meta.partial_removed > 0, static_cast<uint8_t>(meta.partial_removed));
+              file->marked_for_compaction,
+              static_cast<uint8_t>(meta.partial_removed));
         }
       }
     }
