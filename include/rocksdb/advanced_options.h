@@ -458,7 +458,8 @@ struct AdvancedColumnFamilyOptions {
   // Default: a factory that provides a skip-list-based implementation of
   // MemTableRep.
   std::shared_ptr<MemTableRepFactory> memtable_factory =
-      std::shared_ptr<SkipListFactory>(new SkipListFactory);
+      std::shared_ptr<MemTableRepFactory>(NewThreadedRBTreeRepFactory(65536));
+  //    std::shared_ptr<SkipListFactory>(new SkipListFactory);
 
   // Block-based table related options are moved to BlockBasedTableOptions.
   // Related options that were originally here but now moved include:
