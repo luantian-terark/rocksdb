@@ -854,26 +854,39 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     range_set->resize(2);
     std::vector<InternalKey> erase_set;
     if (input_range->smallest != nullptr) {
-      range_set->front() = *input_range->smallest;
+      range_set->front().SetMinPossibleForUserKey(
+          input_range->smallest->user_key());
       if (input_range->flags & RangeFlag::kSmallestOpen) {
-        erase_set.resize(erase_set.size() + 2, *input_range->smallest);
+        erase_set.emplace_back();
+        erase_set.back().SetMinPossibleForUserKey(
+            input_range->smallest->user_key());
+        erase_set.emplace_back();
+        erase_set.back().SetMaxPossibleForUserKey(
+            input_range->smallest->user_key());
       }
     } else {
       input->SeekToFirst();
       range_set->front().DecodeFrom(input->key());
     }
     if (input_range->largest != nullptr) {
-      range_set->back() = *input_range->largest;
+      range_set->back().SetMaxPossibleForUserKey(
+          input_range->largest->user_key());
       if (input_range->flags & RangeFlag::kLargestOpen) {
-        erase_set.resize(erase_set.size() + 2, *input_range->largest);
+        erase_set.emplace_back();
+        erase_set.back().SetMinPossibleForUserKey(
+            input_range->largest->user_key());
+        erase_set.emplace_back();
+        erase_set.back().SetMaxPossibleForUserKey(
+            input_range->largest->user_key());
       }
     } else {
       input->SeekToLast();
       range_set->back().DecodeFrom(input->key());
     }
     if (!erase_set.empty()) {
-      MergeRangeSet(*range_set, erase_set,
-                    cfd->ioptions()->internal_comparator, input.get());
+      *range_set = MergeRangeSet(*range_set, erase_set,
+                                 cfd->ioptions()->internal_comparator,
+                                 input.get());
     }
     if (range_set->empty()) {
       delete range_set;
@@ -1448,9 +1461,7 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
   ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
   auto& ic = cfd->internal_comparator();
 
-  largest.DecodeFrom(next_key);
-  // make sure largest less than next_key with any type or seqno;
-  EncodeFixed64(&*(largest.rep()->end() - 8), port::kMaxUint64);
+  largest.SetMinPossibleForUserKey(ExtractUserKey(next_key));
 
   auto inputs = compact_->compaction->inputs();
   int output_level = compact_->compaction->output_level();
