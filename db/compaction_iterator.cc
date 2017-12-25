@@ -163,6 +163,11 @@ CompactionIterator::AdaptToInternalIterator() {
       new CompactionIteratorToInternalIterator(this));
 }
 
+void CompactionIterator::SetFilterSampleInterval(size_t sample_interval) {
+  assert((sample_interval&(sample_interval-1)) == 0); // must be power of 2
+  filter_sample_interval_ = sample_interval;
+}
+
 void CompactionIterator::NextFromInput() {
   at_next_ = false;
   valid_ = false;
@@ -229,7 +234,7 @@ void CompactionIterator::NextFromInput() {
         CompactionFilter::Decision filter;
         compaction_filter_value_.clear();
         compaction_filter_skip_until_.Clear();
-        if (filter_sample_interval_ && filter_hit_count_ % filter_sample_interval_ == 0) {
+        if (filter_sample_interval_ && (filter_hit_count_ & (filter_sample_interval_-1)) == 0) {
           StopWatchNano timer(env_, true);
           filter = compaction_filter_->FilterV2(
               compaction_->level(), ikey_.user_key,

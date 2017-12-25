@@ -98,7 +98,7 @@ class CompactionIterator {
   const Slice& user_key() const { DoSeekToFirstIfNeeded(); return current_user_key_; }
   const CompactionIterationStats& iter_stats() const { DoSeekToFirstIfNeeded(); return iter_stats_; }
 
-  void SetFilterSampleInterval(size_t filter_sample_interval) { filter_sample_interval_ = filter_sample_interval; }
+  void SetFilterSampleInterval(size_t filter_sample_interval);
 
  private:
   // Processes the input stream to find the next output
