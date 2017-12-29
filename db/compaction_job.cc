@@ -854,15 +854,12 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     range_set->resize(2);
     std::vector<InternalKey> erase_set;
     if (input_range->smallest != nullptr) {
-      range_set->front().SetMinPossibleForUserKey(
-          input_range->smallest->user_key());
+      range_set->front() = *input_range->smallest;
       if (input_range->flags & RangeFlag::kSmallestOpen) {
         erase_set.emplace_back();
         erase_set.back().SetMinPossibleForUserKey(
             input_range->smallest->user_key());
-        erase_set.emplace_back();
-        erase_set.back().SetMaxPossibleForUserKey(
-            input_range->smallest->user_key());
+        erase_set.emplace_back(*input_range->smallest);
       }
     } else {
       input->SeekToFirst();
@@ -1547,14 +1544,14 @@ Status CompactionJob::InstallCompactionResults(
                        return s.partial_remove_info.active;
                    }) != compact_->sub_compact_states.end()) {
     for (const auto& s : compact_->sub_compact_states) {
-      if (!s.partial_remove_info.smallest.Encode().empty() && 
-          !s.partial_remove_info.largest.Encode().empty()) {
+      if (s.partial_remove_info.smallest.size() != 0 &&
+          s.partial_remove_info.largest.size() != 0) {
         erase_set.emplace_back(s.partial_remove_info.smallest);
         erase_set.emplace_back(s.partial_remove_info.largest);
       } else {
         // this sub compact empty ...
-        assert(s.partial_remove_info.smallest.Encode().empty());
-        assert(s.partial_remove_info.largest.Encode().empty());
+        assert(s.partial_remove_info.smallest.size() == 0);
+        assert(s.partial_remove_info.largest.size() == 0);
       }
     }
   }
