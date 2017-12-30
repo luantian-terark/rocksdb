@@ -1468,11 +1468,7 @@ bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
   }
   bool found = false;
   for (auto& level : *inputs) {
-    if (level.level == 0) {
-      // bad case ...
-      return false;
-    }
-    if (level.files.empty()) {
+    if (level.level == 0 || level.files.empty()) {
       continue;
     }
     auto overlap = FindLevelOverlap(level.files, ic, &smallest, &largest);
