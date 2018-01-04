@@ -848,30 +848,40 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
 
   // apply input_range
   if (sub_compact->compaction->input_range() != nullptr) {
-    typedef CompactionInputFilesRange::RangeFlag RangeFlag;
+    typedef CompactionInputFilesRange::IntervalFlag IntervalFlag;
+    typedef CompactionInputFilesRange::ExpandType ExpandType;
     auto input_range = sub_compact->compaction->input_range();
     auto range_set = new std::vector<InternalKey>;
     range_set->resize(2);
     std::vector<InternalKey> erase_set;
     if (input_range->smallest != nullptr) {
-      range_set->front() = *input_range->smallest;
-      if (input_range->flags & RangeFlag::kSmallestOpen) {
+      if (input_range->expand == ExpandType::kLeftType) {
+        range_set->front().SetMinPossibleForUserKey(
+            input_range->smallest->user_key());
+      } else {
+        assert(input_range->expand == ExpandType::kRightType);
+        range_set->front() = *input_range->smallest;
+      }
+      if (input_range->flags & IntervalFlag::kSmallestOpen) {
         erase_set.emplace_back();
         erase_set.back().SetMinPossibleForUserKey(
             input_range->smallest->user_key());
-        erase_set.emplace_back(*input_range->smallest);
+        erase_set.emplace_back(range_set->front());
       }
     } else {
       input->SeekToFirst();
       range_set->front().DecodeFrom(input->key());
     }
     if (input_range->largest != nullptr) {
-      range_set->back().SetMaxPossibleForUserKey(
-          input_range->largest->user_key());
-      if (input_range->flags & RangeFlag::kLargestOpen) {
-        erase_set.emplace_back();
-        erase_set.back().SetMinPossibleForUserKey(
+      if (input_range->expand == ExpandType::kRightType) {
+        range_set->back().SetMaxPossibleForUserKey(
             input_range->largest->user_key());
+      } else {
+        assert(input_range->expand == ExpandType::kLeftType);
+        range_set->back() = *input_range->largest;
+      }
+      if (input_range->flags & IntervalFlag::kLargestOpen) {
+        erase_set.emplace_back(range_set->back());
         erase_set.emplace_back();
         erase_set.back().SetMaxPossibleForUserKey(
             input_range->largest->user_key());
@@ -965,15 +975,47 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
 
   Slice* start = sub_compact->start;
   Slice* end = sub_compact->end;
-  if (start != nullptr) {
-    IterKey start_iter;
-    start_iter.SetInternalKey(*start, kMaxSequenceNumber, kValueTypeForSeek);
-    input->Seek(start_iter.GetInternalKey());
+  auto input_seek_to_first = [&] {
+    if (start != nullptr) {
+      IterKey start_iter;
+      start_iter.SetInternalKey(*start, kMaxSequenceNumber, kValueTypeForSeek);
+      input->Seek(start_iter.GetInternalKey());
+    } else {
+      input->SeekToFirst();
+    }
+    return input->Valid();
+  };
+  auto input_seek_to_last = [&] {
+    if (end != nullptr) {
+      IterKey end_iter;
+      end_iter.SetInternalKey(*end, kMaxSequenceNumber, kValueTypeForSeek);
+      input->SeekForPrev(end_iter.GetInternalKey());
+    } else {
+      input->SeekToLast();
+    }
+    return input->Valid();
+  };
+  if (compact_->sub_compact_states.size() > 1 &&
+      (compact_->compaction->enable_partial_remove() ||
+       compact_->compaction->input_range() != nullptr)) {
+    assert(compact_->compaction->output_level() != 0);
+    if (input_seek_to_last()) {
+      sub_compact->partial_remove_info.largest.DecodeFrom(input->key());
+    }
+    if (input_seek_to_first()) {
+      sub_compact->partial_remove_info.smallest.DecodeFrom(input->key());
+    }
+    if (sub_compact->partial_remove_info.smallest.size() != 0 &&
+        sub_compact->partial_remove_info.largest.size() != 0 &&
+        IsCoveredBySingleSST(sub_compact)) {
+      input.reset(NewEmptyInternalIterator());
+      sub_compact->partial_remove_info.smallest.Clear();
+      sub_compact->partial_remove_info.largest.Clear();
+    }
   } else {
-    input->SeekToFirst();
-  }
-  if (input->Valid()) {
-    sub_compact->partial_remove_info.smallest.DecodeFrom(input->key());
+    if (input_seek_to_first()) {
+      sub_compact->partial_remove_info.smallest.DecodeFrom(input->key());
+    }
   }
 
   // we allow only 1 compaction event listener. Used by blob storage
@@ -1148,7 +1190,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         }
       }
       if (sub_compact->compaction->enable_partial_remove() && next_key &&
-          ShouldFinishCompaction(sub_compact, *next_key)) {
+          CanFinishSubCompaction(sub_compact, next_key)) {
         sub_compact->partial_remove_info.active = true;
         break;
       }
@@ -1205,14 +1247,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     RecordDroppedKeys(range_del_out_stats, &sub_compact->compaction_job_stats);
   }
   if (!sub_compact->partial_remove_info.active) {
-    if (end != nullptr) {
-      IterKey end_iter;
-      end_iter.SetInternalKey(*end, kMaxSequenceNumber, kValueTypeForSeek);
-      input->SeekForPrev(end_iter.GetInternalKey());
-    } else {
-      input->SeekToLast();
-    }
-    if (input->Valid()) {
+    if (input_seek_to_last()) {
       sub_compact->partial_remove_info.largest.DecodeFrom(input->key());
     }
   }
@@ -1451,23 +1486,52 @@ Status CompactionJob::FinishCompactionOutputFile(
 }
 
 
-bool CompactionJob::ShouldFinishCompaction(SubcompactionState* sub_compact,
-    Slice next_key) {
+bool CompactionJob::IsCoveredBySingleSST(SubcompactionState* sub_compact) {
   auto& smallest = sub_compact->partial_remove_info.smallest;
   auto& largest = sub_compact->partial_remove_info.largest;
   ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
   auto& ic = cfd->internal_comparator();
+  int output_level = compact_->compaction->output_level();
+  if (output_level == 0) {
+    return false;
+  }
+  for (auto& level : *compact_->compaction->inputs()) {
+    if (level.level != output_level || level.files.empty()) {
+      continue;
+    }
+    auto overlap = FindLevelOverlap(level.files, ic, &smallest, &largest);
+    if (level.level == output_level) {
+      if (overlap.first == overlap.second) {
+        auto file = level.files[overlap.first];
+        if (ic.Compare(smallest, file->smallest()) > 0 &&
+            ic.Compare(largest, file->largest()) < 0) {
+          return true;
+        }
+      }
+    }
+    break;
+  }
+  return false;
+}
 
-  largest.SetMinPossibleForUserKey(ExtractUserKey(next_key));
+bool CompactionJob::CanFinishSubCompaction(
+    SubcompactionState* sub_compact,
+    const Slice* next_table_min_key) {
+  auto& smallest = sub_compact->partial_remove_info.smallest;
+  auto& largest = sub_compact->partial_remove_info.largest;
+  ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
+  auto& ic = cfd->internal_comparator();
+  if (next_table_min_key != nullptr) {
+    largest.SetMinPossibleForUserKey(ExtractUserKey(*next_table_min_key));
+  }
 
-  auto inputs = compact_->compaction->inputs();
   int output_level = compact_->compaction->output_level();
   if (output_level == 0) {
     // ignore level 0
     return false;
   }
   bool found = false;
-  for (auto& level : *inputs) {
+  for (auto& level : *compact_->compaction->inputs()) {
     if (level.level == 0 || level.files.empty()) {
       continue;
     }

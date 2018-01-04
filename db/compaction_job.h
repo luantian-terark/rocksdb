@@ -105,8 +105,9 @@ class CompactionJob {
       RangeDelAggregator* range_del_agg,
       CompactionIterationStats* range_del_out_stats,
       const Slice* next_table_min_key = nullptr);
-  bool ShouldFinishCompaction(SubcompactionState* sub_compact,
-                              Slice next_key);
+  bool IsCoveredBySingleSST(SubcompactionState* sub_compact);
+  bool CanFinishSubCompaction(SubcompactionState* sub_compact,
+                              const Slice* next_table_min_key = nullptr);
   Status InstallCompactionResults(const MutableCFOptions& mutable_cf_options);
   void RecordCompactionIOStats();
   Status OpenCompactionOutputFile(SubcompactionState* sub_compact);
