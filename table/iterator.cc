@@ -42,13 +42,13 @@ public:
     smallest_ = &range_set_->front();
     largest_ = smallest_ + 1;
     invalid_ = false;
-    iter_->Seek(smallest_->Encode());
+    Seek(smallest_->Encode());
   }
   void SeekToLast() override final {
     largest_ = &range_set_->back();
     smallest_ = largest_ - 1;
     invalid_ = false;
-    iter_->SeekForPrev(largest_->Encode());
+    SeekForPrev(largest_->Encode());
   }
   void Seek(const Slice& target) override final {
     Slice s = target;

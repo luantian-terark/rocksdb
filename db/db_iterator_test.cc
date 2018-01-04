@@ -2209,8 +2209,7 @@ TEST_F(DBIteratorTest, RangeWrappedInternalIteratorTest) {
       auto find1 = std::lower_bound(valid.begin(), valid.end(), i);
       if (find1 == valid.end()) {
         ASSERT_FALSE(iter->Valid());
-      }
-      else {
+      } else {
         uint64_t value = *(const uint64_t*)iter->key().data());
         if (port::kLittleEndian) {
           value = EndianTransform(value, 8);
@@ -2221,8 +2220,7 @@ TEST_F(DBIteratorTest, RangeWrappedInternalIteratorTest) {
       iter->SeekForPrev(key);
       if (find2 == valid.begin()) {
         ASSERT_FALSE(iter->Valid());
-      }
-      else {
+      } else {
         uint64_t value = *(const uint64_t*)iter->key().data());
         if (port::kLittleEndian) {
           value = EndianTransform(value, 8);
@@ -2235,6 +2233,11 @@ TEST_F(DBIteratorTest, RangeWrappedInternalIteratorTest) {
     { 2, 3, 4 },
     { 1, 2, 4, 5 },
     { 2, 4 }
+  );
+  test(
+    { 1, 3, 5 },
+    { 2, 2 },
+    { }
   );
   test(
     { 1, 3, 5 },
