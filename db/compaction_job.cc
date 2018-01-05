@@ -849,42 +849,31 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   // apply input_range
   if (sub_compact->compaction->input_range() != nullptr) {
     typedef CompactionInputFilesRange::IntervalFlag IntervalFlag;
-    typedef CompactionInputFilesRange::ExpandType ExpandType;
     auto input_range = sub_compact->compaction->input_range();
     auto range_set = new std::vector<InternalKey>;
     range_set->resize(2);
     std::vector<InternalKey> erase_set;
     if (input_range->smallest != nullptr) {
-      if (input_range->expand == ExpandType::kLeftType) {
-        range_set->front().SetMinPossibleForUserKey(
-            input_range->smallest->user_key());
-      } else {
-        assert(input_range->expand == ExpandType::kRightType);
-        range_set->front() = *input_range->smallest;
-      }
+      range_set->front().SetMinPossibleForUserKey(
+          input_range->smallest->user_key());
       if (input_range->flags & IntervalFlag::kSmallestOpen) {
-        erase_set.emplace_back();
-        erase_set.back().SetMinPossibleForUserKey(
-            input_range->smallest->user_key());
         erase_set.emplace_back(range_set->front());
+        erase_set.emplace_back();
+        erase_set.back().SetMaxPossibleForUserKey(
+            input_range->smallest->user_key());
       }
     } else {
       input->SeekToFirst();
       range_set->front().DecodeFrom(input->key());
     }
     if (input_range->largest != nullptr) {
-      if (input_range->expand == ExpandType::kRightType) {
-        range_set->back().SetMaxPossibleForUserKey(
-            input_range->largest->user_key());
-      } else {
-        assert(input_range->expand == ExpandType::kLeftType);
-        range_set->back() = *input_range->largest;
-      }
+      range_set->back().SetMaxPossibleForUserKey(
+          input_range->largest->user_key());
       if (input_range->flags & IntervalFlag::kLargestOpen) {
-        erase_set.emplace_back(range_set->back());
         erase_set.emplace_back();
-        erase_set.back().SetMaxPossibleForUserKey(
+        erase_set.back().SetMinPossibleForUserKey(
             input_range->largest->user_key());
+        erase_set.emplace_back(range_set->back());
       }
     } else {
       input->SeekToLast();

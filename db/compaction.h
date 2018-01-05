@@ -32,18 +32,12 @@ struct CompactionInputFiles {
 struct CompactionInputFilesRange {
   const InternalKey* smallest = nullptr;
   const InternalKey* largest = nullptr;
-  enum IntervalFlag : uint32_t {
+  enum IntervalFlag : uint64_t {
     kEmptyFlag      = 0,
     kSmallestOpen   = 1 << 0,
     kLargestOpen    = 1 << 1,
   };
-  enum ExpandType : uint32_t {
-    kErrorType = 0,
-    kLeftType = 1,
-    kRightType = 2,
-  };
   uint32_t flags = kEmptyFlag;
-  uint32_t expand = kErrorType;
 };
 
 class Version;
