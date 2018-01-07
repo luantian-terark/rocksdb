@@ -1025,7 +1025,6 @@ class LevelCompactionBuilder {
   bool is_manual_ = false;
   bool enable_partial_remove_ = false;
   bool enable_input_range_ = false;
-  bool enable_sub_compaction_ = true;
   CompactionInputFiles start_level_inputs_;
   CompactionInputFilesRange input_range_;
   std::vector<CompactionInputFiles> compaction_inputs_;
@@ -1269,8 +1268,6 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
   }
   auto& ic = ioptions_.internal_comparator;
   auto uc = ioptions_.internal_comparator.user_comparator();
-  auto& lv0 = vstorage_->LevelFiles(0);
-  auto& lv1 = vstorage_->LevelFiles(1);
   // leftish is find from top , otherwise from bottom
   auto find_operlap = [&ic](const std::vector<FileMetaData*>& files,
                             const InternalKey* smallest,
@@ -1283,11 +1280,21 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     if (largest != nullptr) {
       max_largest.SetMaxPossibleForUserKey(largest->user_key());
     }
-    return FindLevelOverlap(files, ic,
-                            smallest != nullptr ? &min_smallest : nullptr,
-                            largest != nullptr ? &max_largest : nullptr);
+    auto overlap = FindLevelOverlap(
+                       files, ic,
+                       smallest != nullptr ? &min_smallest : nullptr,
+                       largest != nullptr ? &max_largest : nullptr);
+    assert(smallest == nullptr || overlap.first == 0 ||
+           ic.user_comparator()->Compare(
+               files[overlap.first - 1]->largest().user_key(),
+               smallest->user_key()) < 0);
+    assert(largest == nullptr || overlap.second == ptrdiff_t(files.size() - 1) ||
+           ic.user_comparator()->Compare(
+               files[overlap.second + 1]->smallest().user_key(),
+               largest->user_key()) > 0);
+    return overlap;
   };
-  int start_level = 1;
+  const int start_level = 1;
   std::vector<size_t> level_size;
   level_size.resize(vstorage_->num_levels(), 0);
   for (int i = 0; i < vstorage_->num_levels(); ++i) {
@@ -1319,6 +1326,8 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     const InternalKey* smallest = nullptr;
     const InternalKey* largest = nullptr;
     bool check_partial_removed = true;
+    auto& lv0 = vstorage_->LevelFiles(0);
+    auto& lv1 = vstorage_->LevelFiles(1);
     while (lv0.size() >= mutable_cf_options_.level0_file_num_compaction_trigger) {
       if (output_level_ > 1 &&
           lv0.size() < mutable_cf_options_.level0_slowdown_writes_trigger) {
@@ -1400,7 +1409,6 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
         input_range_.largest = largest;
       }
       output_level_ = 1;
-      enable_sub_compaction_ = false;
       compaction_reason_ = CompactionReason::kLevelL0FilesNum;
       return GetCompaction();
     }
@@ -1534,7 +1542,6 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     assert(!compaction_inputs_.empty());
     input_range_ = rs;
     enable_input_range_ = true;
-    enable_sub_compaction_ = false;
     compaction_reason_ = CompactionReason::kBottommostFiles;
     return GetCompaction();
   }
@@ -1545,8 +1552,7 @@ Compaction* LevelCompactionBuilder::GetCompaction() {
   auto c = new Compaction(
       vstorage_, ioptions_, mutable_cf_options_, std::move(compaction_inputs_),
       output_level_, mutable_cf_options_.MaxFileSizeForLevel(output_level_),
-      enable_sub_compaction_ ?
-          mutable_cf_options_.max_compaction_bytes : uint64_t(1) << 60,
+      mutable_cf_options_.max_compaction_bytes,
       GetPathId(ioptions_, mutable_cf_options_, output_level_),
       GetCompressionType(ioptions_, vstorage_, mutable_cf_options_,
                          output_level_, vstorage_->base_level()),

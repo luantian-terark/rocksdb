@@ -79,43 +79,35 @@ std::vector<InternalKey> MergeRangeSet(
     output.emplace_back();
     iter->Seek(left.Encode());
     if (iter->Valid()) {
-      if (include) {
+      if (include || iter->key() != left.Encode()) {
         output.back().DecodeFrom(iter->key());
       } else {
-        if (iter->key() == left.Encode()) {
-          iter->Next();
-          if (iter->Valid()) {
-            output.back().DecodeFrom(iter->key());
-          }
-        } else {
+        iter->Next();
+        if (iter->Valid()) {
           output.back().DecodeFrom(iter->key());
         }
       }
     }
   };
   auto put_right_bound = [&](const InternalKey& right, bool include) {
-    if (!output.back().Valid()) {
+    if (output.back().size() == 0) {
       output.pop_back();
       return;
     }
     output.emplace_back();
     iter->SeekForPrev(right.Encode());
     if (iter->Valid()) {
-      if (include) {
+      if (include || iter->key() != right.Encode()) {
         output.back().DecodeFrom(iter->key());
       } else {
-        if (iter->key() == right.Encode()) {
-          iter->Prev();
-          if (iter->Valid()) {
-            output.back().DecodeFrom(iter->key());
-          }
-        } else {
+        iter->Prev();
+        if (iter->Valid()) {
           output.back().DecodeFrom(iter->key());
         }
       }
     }
-    if (!output.back().Valid() ||
-        ic.Compare(*(output.end() - 2), output.back()) > 0) {
+    if (output.back().size() == 0 ||
+        ic.Compare(output.end()[-2], output.back()) > 0) {
       output.pop_back();
       output.pop_back();
     }
@@ -175,6 +167,11 @@ struct PartialRemoveMetaData {
   PartialRemoveMetaData(FileMetaData* file,
                         const std::vector<InternalKey>& erase_set,
                         const InternalKeyComparator& ic) {
+    if (erase_set.empty()) {
+      range_set = file->range_set;
+      partial_removed = file->partial_removed;
+      return;
+    }
     auto table_reader = file->fd.table_reader;
     assert(table_reader);
     std::unique_ptr<InternalIterator> iter(
@@ -1179,7 +1176,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         }
       }
       if (sub_compact->compaction->enable_partial_remove() && next_key &&
-          CanFinishSubCompaction(sub_compact, next_key)) {
+          CanFinishSubCompaction(sub_compact, *next_key)) {
         sub_compact->partial_remove_info.active = true;
         break;
       }
@@ -1505,14 +1502,17 @@ bool CompactionJob::IsCoveredBySingleSST(SubcompactionState* sub_compact) {
 
 bool CompactionJob::CanFinishSubCompaction(
     SubcompactionState* sub_compact,
-    const Slice* next_table_min_key) {
+    const Slice& next_table_min_key) {
   auto& smallest = sub_compact->partial_remove_info.smallest;
   auto& largest = sub_compact->partial_remove_info.largest;
+  if (ExtractUserKey(next_table_min_key) ==
+          sub_compact->outputs.back().meta.largest().user_key()) {
+    largest = sub_compact->outputs.back().meta.largest();
+  } else {
+    largest.SetMinPossibleForUserKey(ExtractUserKey(next_table_min_key));
+  }
   ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
   auto& ic = cfd->internal_comparator();
-  if (next_table_min_key != nullptr) {
-    largest.SetMinPossibleForUserKey(ExtractUserKey(*next_table_min_key));
-  }
 
   int output_level = compact_->compaction->output_level();
   if (output_level == 0) {
@@ -1584,7 +1584,6 @@ Status CompactionJob::InstallCompactionResults(
   compaction->AddInputDeletions(compact_->compaction->edit());
 
   auto& ic = compaction->column_family_data()->internal_comparator();
-  std::vector<InternalKey> erase_set;
   // collect partial remove info
   if (compaction->input_range() != nullptr ||
       std::find_if(compact_->sub_compact_states.begin(),
@@ -1592,6 +1591,7 @@ Status CompactionJob::InstallCompactionResults(
                    [](const CompactionJob::SubcompactionState& s) {
                        return s.partial_remove_info.active;
                    }) != compact_->sub_compact_states.end()) {
+    std::vector<InternalKey> erase_set;
     for (const auto& s : compact_->sub_compact_states) {
       if (s.partial_remove_info.smallest.size() != 0 &&
           s.partial_remove_info.largest.size() != 0) {
@@ -1603,8 +1603,6 @@ Status CompactionJob::InstallCompactionResults(
         assert(s.partial_remove_info.largest.size() == 0);
       }
     }
-  }
-  if (!erase_set.empty()) {
     // reclaim input sst
     auto inputs = compaction->inputs();
     for (auto& level : *inputs) {
