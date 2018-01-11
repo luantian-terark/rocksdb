@@ -22,6 +22,8 @@ namespace rocksdb {
 
 class CompactionIterator {
  public:
+   friend class CompactionIteratorToInternalIterator;
+
   // A wrapper around Compaction. Has a much smaller interface, only what
   // CompactionIterator uses. Tests can override it.
   class CompactionProxy {
@@ -90,13 +92,13 @@ class CompactionIterator {
   std::unique_ptr<InternalIterator> AdaptToInternalIterator();
 
   // Getters
-  const Slice& key() const { DoSeekToFirstIfNeeded(); return key_; }
-  const Slice& value() const { DoSeekToFirstIfNeeded(); return value_; }
-  const Status& status() const { DoSeekToFirstIfNeeded(); return status_; }
-  const ParsedInternalKey& ikey() const { DoSeekToFirstIfNeeded(); return ikey_; }
-  bool Valid() const { DoSeekToFirstIfNeeded(); return valid_; }
-  const Slice& user_key() const { DoSeekToFirstIfNeeded(); return current_user_key_; }
-  const CompactionIterationStats& iter_stats() const { DoSeekToFirstIfNeeded(); return iter_stats_; }
+  const Slice& key() const { return key_; }
+  const Slice& value() const { return value_; }
+  const Status& status() const { return status_; }
+  const ParsedInternalKey& ikey() const { return ikey_; }
+  bool Valid() const { return valid_; }
+  const Slice& user_key() const { return current_user_key_; }
+  const CompactionIterationStats& iter_stats() const { return iter_stats_; }
 
   void SetFilterSampleInterval(size_t filter_sample_interval);
 
@@ -118,8 +120,6 @@ class CompactionIterator {
   inline SequenceNumber findEarliestVisibleSnapshot(
       SequenceNumber in, SequenceNumber* prev_snapshot);
 
-  void DoSeekToFirstIfNeeded() const;
-
   InternalIterator* input_;
   const Comparator* cmp_;
   MergeHelper* merge_helper_;
@@ -137,7 +137,6 @@ class CompactionIterator {
   SequenceNumber earliest_snapshot_;
   SequenceNumber latest_snapshot_;
   bool ignore_snapshots_;
-  mutable int SeekToFirst_status_;
 
   // State
   //

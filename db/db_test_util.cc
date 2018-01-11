@@ -8,7 +8,11 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/db_test_util.h"
-#include <table/terark_zip_weak_function.h>
+#if _MSC_VER
+# include "../../terark-zip-rocksdb/src/table/terark_zip_table.h"
+#else
+# include <table/terark_zip_weak_function.h>
+#endif
 #include "db/forward_iterator.h"
 
 namespace rocksdb {
@@ -251,15 +255,17 @@ Options DBTestBase::CurrentOptions(
   options.base_background_compactions = -1;
   options.wal_recovery_mode = WALRecoveryMode::kTolerateCorruptedTailRecords;
   options.compaction_pri = CompactionPri::kByCompensatedSize;
-
+#if _MSC_VER
+#else
   if (NewTerarkZipTableFactory) {
     TerarkZipTableOptions tzto;
     tzto.disableSecondPassIter = true;
     std::shared_ptr<TableFactory> terark_zip_table_factory(NewTerarkZipTableFactory(tzto,
-        NewBlockBasedTableFactory(BlockBasedTableOptions())));
+      NewBlockBasedTableFactory(BlockBasedTableOptions())));
     options.allow_mmap_reads = true;
     options.table_factory = terark_zip_table_factory;
   }
+#endif
 
   return CurrentOptions(options, options_override);
 }

@@ -772,7 +772,6 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       range_del_agg2.get(), compaction_filter);
   c_iter2->SetFilterSampleInterval(0);
   auto second_pass_iter = c_iter2->AdaptToInternalIterator();
-  c_iter2->SeekToFirst();
   if (c_iter->Valid() &&
       sub_compact->compaction->output_level() != 0) {
     // ShouldStopBefore() maintains state based on keys processed so far. The
