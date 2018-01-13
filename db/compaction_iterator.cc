@@ -42,9 +42,10 @@ void CompactionIteratorToInternalIterator::Seek(const Slice& target) {
   c_iter_->has_outputted_key_ = false;
   c_iter_->clear_and_output_next_key_ = false;
 
-  InternalKey t;
-  t.SetMinPossibleForUserKey(ExtractUserKey(target));
-  c_iter_->input_->Seek(t.Encode());
+  IterKey key_for_seek;
+  key_for_seek.SetInternalKey(ExtractUserKey(target), kMaxSequenceNumber,
+                              kValueTypeForSeek);
+  c_iter_->input_->Seek(key_for_seek.GetKey());
   c_iter_->SeekToFirst();
   while (c_iter_->Valid() &&
          c_iter_->cmp_->Compare(c_iter_->key(), target) < 0) {

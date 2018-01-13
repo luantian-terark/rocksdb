@@ -147,12 +147,13 @@ public:
   void BasicTest(bool rev, size_t count, size_t prefix, size_t blockUnits, size_t minValue) {
     Options options = CurrentOptions();
     TerarkZipTableOptions tzto;
-    tzto.disableSecondPassIter = true;
+    tzto.disableSecondPassIter = false;
     tzto.keyPrefixLen = prefix;
     tzto.offsetArrayBlockUnits = (uint16_t)blockUnits;
     tzto.minDictZipValueSize = minValue;
     tzto.entropyAlgo = TerarkZipTableOptions::kFSE;
     tzto.localTempDir = localTempDir;
+    tzto.debugLevel = 1;
     options.allow_mmap_reads = true;
     if (rev) {
       options.comparator = &rev_c;
@@ -223,11 +224,12 @@ public:
   void HardZipTest(bool rev, size_t count, size_t prefix) {
     Options options = CurrentOptions();
     TerarkZipTableOptions tzto;
-    tzto.disableSecondPassIter = true;
+    tzto.disableSecondPassIter = false;
     tzto.keyPrefixLen = prefix;
     tzto.localTempDir = localTempDir;
     tzto.minDictZipValueSize = 0;
     tzto.singleIndexMemLimit = 512;
+    tzto.debugLevel = 1;
     options.allow_mmap_reads = true;
     if (rev) {
       options.comparator = &rev_c;
@@ -289,11 +291,12 @@ public:
   void NonCompressedBlobStoreTest(bool rev, BlobStoreType type, size_t count, size_t prefix) {
     Options options = CurrentOptions();
     TerarkZipTableOptions tzto;
-    tzto.disableSecondPassIter = true;
+    tzto.disableSecondPassIter = false;
     tzto.keyPrefixLen = prefix;
     tzto.entropyAlgo = TerarkZipTableOptions::kFSE;
     tzto.localTempDir = localTempDir;
     tzto.minDictZipValueSize = 4096;
+    tzto.debugLevel = 1;
     options.allow_mmap_reads = true;
     switch (type) {
     case PlainBlobStore:
@@ -409,10 +412,11 @@ public:
   void ZeroLengthBlobStoreTest(bool rev, size_t count, size_t prefix) {
       Options options = CurrentOptions();
       TerarkZipTableOptions tzto;
-      tzto.disableSecondPassIter = true;
+      tzto.disableSecondPassIter = false;
       tzto.keyPrefixLen = prefix;
       tzto.entropyAlgo = TerarkZipTableOptions::kFSE;
       tzto.localTempDir = localTempDir;
+      tzto.debugLevel = 1;
       options.allow_mmap_reads = true;
       if (rev) {
           options.comparator = &rev_c;
@@ -501,13 +505,14 @@ public:
                 bool rev, size_t prefix, size_t blockUnits, size_t minValue, size_t indexMem = 2ULL << 30) {
     Options options = CurrentOptions();
     TerarkZipTableOptions tzto;
-    tzto.disableSecondPassIter = true;
+    tzto.disableSecondPassIter = false;
     tzto.keyPrefixLen = prefix;
     tzto.offsetArrayBlockUnits = (uint16_t)blockUnits;
     tzto.minDictZipValueSize = minValue;
     tzto.singleIndexMemLimit = indexMem;
     tzto.entropyAlgo = TerarkZipTableOptions::kFSE;
     tzto.localTempDir = localTempDir;
+    tzto.debugLevel = 1;
     options.allow_mmap_reads = true;
     if (rev) {
       options.comparator = &rev_c;

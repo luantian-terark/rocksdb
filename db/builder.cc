@@ -165,7 +165,6 @@ Status BuildTable(
       builder->Abandon();
     } else {
       iter->SeekToFirst();
-      c_iter2.SeekToFirst();
       s = builder->Finish();
     }
 
