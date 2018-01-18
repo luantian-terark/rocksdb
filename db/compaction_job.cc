@@ -188,6 +188,7 @@ struct PartialRemoveMetaData {
       partial_removed = file->partial_removed;
       return;
     }
+    iter->SeekToLast();
     size_t sst_size = std::max<uint64_t>(1,
         table_reader->ApproximateOffsetOf(iter->key()));
     size_t alive_size = 0;
@@ -1153,11 +1154,27 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       input_status = input->status();
       output_file_ended = true;
     }
+    const Slice* next_key = nullptr;
     if (output_file_ended) {
-      const Slice* next_key = nullptr;
       if (c_iter->Valid()) {
         next_key = &c_iter->key();
       }
+      if (sub_compact->compaction->enable_partial_remove()) {
+        if (next_key != nullptr &&
+            ExtractUserKey(*next_key) !=
+                sub_compact->outputs.back().meta.largest().user_key()) {
+          sub_compact->partial_remove_info.largest.Clear();
+          sub_compact->partial_remove_info.largest.SetMinPossibleForUserKey(
+              ExtractUserKey(*next_key));
+          if (!IsCoveredBySingleSST(sub_compact)) {
+            sub_compact->partial_remove_info.active = true;
+            break;
+          }
+        }
+        output_file_ended = false;
+      }
+    }
+    if (output_file_ended) {
       CompactionIterationStats range_del_out_stats;
       status = FinishCompactionOutputFile(input_status, sub_compact,
                                           range_del_agg.get(),
@@ -1174,11 +1191,6 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         } else {
           sub_compact->compression_dict = std::move(dict_sample_data);
         }
-      }
-      if (sub_compact->compaction->enable_partial_remove() && next_key &&
-          CanFinishSubCompaction(sub_compact, *next_key)) {
-        sub_compact->partial_remove_info.active = true;
-        break;
       }
     }
   }
@@ -1498,60 +1510,6 @@ bool CompactionJob::IsCoveredBySingleSST(SubcompactionState* sub_compact) {
     break;
   }
   return false;
-}
-
-bool CompactionJob::CanFinishSubCompaction(
-    SubcompactionState* sub_compact,
-    const Slice& next_table_min_key) {
-  auto& smallest = sub_compact->partial_remove_info.smallest;
-  auto& largest = sub_compact->partial_remove_info.largest;
-  if (ExtractUserKey(next_table_min_key) ==
-          sub_compact->outputs.back().meta.largest().user_key()) {
-    largest = sub_compact->outputs.back().meta.largest();
-  } else {
-    largest.SetMinPossibleForUserKey(ExtractUserKey(next_table_min_key));
-  }
-  ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
-  auto& ic = cfd->internal_comparator();
-
-  int output_level = compact_->compaction->output_level();
-  if (output_level == 0) {
-    // ignore level 0
-    return false;
-  }
-  bool found = false;
-  for (auto& level : *compact_->compaction->inputs()) {
-    if (level.level == 0 || level.files.empty()) {
-      continue;
-    }
-    auto overlap = FindLevelOverlap(level.files, ic, &smallest, &largest);
-    if (overlap.first > overlap.second) {
-      // none overlap
-      continue;
-    } else if (level.level == output_level) {
-      // Make sure current output not full covered by single optput level sst
-      if (overlap.first == overlap.second) {
-        auto file = level.files[overlap.first];
-        if (ic.Compare(smallest, file->smallest()) > 0 &&
-            ic.Compare(largest, file->largest()) < 0) {
-          // output sst can't partial remove in middle ...
-          return false;
-        }
-      }
-    }
-    if (ic.Compare(level.files[overlap.first]->smallest(), smallest) < 0) {
-      // can't cover left
-      ++overlap.first;
-    }
-    if (ic.Compare(level.files[overlap.second]->largest(), largest) > 0) {
-      // can't cover right
-      --overlap.second;
-    }
-    if (overlap.first <= overlap.second) {
-      found = true;
-    }
-  }
-  return found;
 }
 
 Status CompactionJob::InstallCompactionResults(

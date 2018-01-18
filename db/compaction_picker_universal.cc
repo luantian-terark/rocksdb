@@ -607,7 +607,7 @@ Compaction* UniversalCompactionPicker::PickCompactionToReduceSortedRuns(
       GetCompressionType(ioptions_, vstorage, mutable_cf_options, start_level,
                          1, enable_compression),
       /* grandparents */ {}, /* is manual */ false, score,
-      false /* deletion_compaction */, false, nullptr, compaction_reason);
+      false /* deletion_compaction */, false, false, nullptr, compaction_reason);
 }
 
 // Look at overall size amplification. If size amplification
@@ -740,7 +740,7 @@ Compaction* UniversalCompactionPicker::PickCompactionToReduceSizeAmp(
       GetCompressionType(ioptions_, vstorage, mutable_cf_options,
                          output_level, 1),
       /* grandparents */ {}, /* is manual */ false, score,
-      false /* deletion_compaction */, false, nullptr,
+      false /* deletion_compaction */, false, false, nullptr,
       CompactionReason::kUniversalSizeAmplification);
 }
 }  // namespace rocksdb

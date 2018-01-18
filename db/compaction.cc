@@ -160,7 +160,8 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
                        CompressionType _compression,
                        std::vector<FileMetaData*> _grandparents,
                        bool _manual_compaction, double _score,
-                       bool _deletion_compaction, bool _enable_partial_remove,
+                       bool _deletion_compaction, bool _disable_subcompaction,
+                       bool _enable_partial_remove,
                        const CompactionInputFilesRange* _input_range,
                        CompactionReason _compaction_reason)
     : input_vstorage_(vstorage),
@@ -176,6 +177,7 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
       output_path_id_(_output_path_id),
       output_compression_(_compression),
       deletion_compaction_(_deletion_compaction),
+      disable_subcompaction_(_disable_subcompaction),
       enable_partial_remove_(_enable_partial_remove),
       enable_input_range_(!!_input_range),
       input_range_(_input_range ? *_input_range : CompactionInputFilesRange()),
@@ -481,7 +483,8 @@ bool Compaction::IsOutputLevelEmpty() const {
 }
 
 bool Compaction::ShouldFormSubcompactions() const {
-  if (immutable_cf_options_.max_subcompactions <= 1 || cfd_ == nullptr) {
+  if (immutable_cf_options_.max_subcompactions <= 1 || cfd_ == nullptr ||
+      disable_subcompaction_) {
     return false;
   }
   if (cfd_->ioptions()->compaction_style == kCompactionStyleLevel) {

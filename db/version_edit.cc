@@ -111,7 +111,8 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
       return false;
     }
     bool has_customized_fields = false;
-    if (f.marked_for_compaction) {
+    if (f.marked_for_compaction || f.partial_removed ||
+        f.range_set.size() > 2) {
       PutVarint32(dst, kNewFile4);
       has_customized_fields = true;
     } else if (f.fd.GetPathId() == 0) {
@@ -168,9 +169,9 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
         PutLengthPrefixedSlice(dst, Slice(&p, 1));
       }
       if (f.partial_removed) {
-          PutVarint32(dst, CustomTag::kPartialRemoved);
-          char p = static_cast<char>(f.partial_removed);
-          PutLengthPrefixedSlice(dst, Slice(&p, 1));
+        PutVarint32(dst, CustomTag::kPartialRemoved);
+        char p = static_cast<char>(f.partial_removed);
+        PutLengthPrefixedSlice(dst, Slice(&p, 1));
       }
       for (size_t j = 1; j < f.range_set.size() - 1; ++j) {
         PutVarint32(dst, CustomTag::kExpandRangeSet);

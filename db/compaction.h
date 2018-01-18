@@ -56,7 +56,8 @@ class Compaction {
              uint32_t output_path_id, CompressionType compression,
              std::vector<FileMetaData*> grandparents,
              bool manual_compaction = false, double score = -1,
-             bool deletion_compaction = false, bool enable_partial_remove = false,
+             bool deletion_compaction = false, bool disable_subcompaction = false,
+             bool enable_partial_remove = false,
              const CompactionInputFilesRange* input_range = nullptr,
              CompactionReason compaction_reason = CompactionReason::kUnknown);
 
@@ -302,6 +303,9 @@ class Compaction {
   CompressionType output_compression_;
   // If true, then the comaction can be done by simply deleting input files.
   const bool deletion_compaction_;
+
+  // If true, disable subcompaction
+  const bool disable_subcompaction_;
 
   // If true, compaction should break when some input sst can remove
   const bool enable_partial_remove_;
