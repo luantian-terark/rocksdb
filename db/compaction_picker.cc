@@ -1351,9 +1351,9 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     const InternalKey* largest = nullptr;
     auto& lv0 = vstorage_->LevelFiles(0);
     auto& lv1 = vstorage_->LevelFiles(1);
-    while (lv0.size() >= mutable_cf_options_.level0_file_num_compaction_trigger) {
+    while ((int)lv0.size() >= mutable_cf_options_.level0_file_num_compaction_trigger) {
       if (output_level_ > 1 &&
-          lv0.size() < mutable_cf_options_.level0_slowdown_writes_trigger) {
+          (int)lv0.size() < mutable_cf_options_.level0_slowdown_writes_trigger) {
         break;
       }
       bool invalid = false;
