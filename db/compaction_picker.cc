@@ -1330,20 +1330,25 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     level_size[c->output_level()] +=
         mutable_cf_options_.MaxFileSizeForLevel(c->output_level());
   }
-  double m = mutable_cf_options_.max_bytes_for_level_multiplier;
-  double output_level_ratio = 0;
-  for (int i = start_level; i < vstorage_->num_levels(); ++i) {
-    if (level_size[i - 1] * m < level_size[i]) {
-      continue;
+  const double m = mutable_cf_options_.max_bytes_for_level_multiplier;
+  auto get_output_level = [&](int start) {
+    double level_ratio = 0;
+    int level = -1;
+    for (int i = start; i < vstorage_->num_levels(); ++i) {
+      if (level_size[i - 1] * m < level_size[i]) {
+        continue;
+      }
+      double ratio = double(level_size[i]) / std::max<size_t>(1, level_size[i - 1]);
+      if (output_level_ == -1 || ratio < level_ratio) {
+        level_ratio = ratio;
+        level = i;
+      }
     }
-    double ratio = double(level_size[i]) / std::max<size_t>(1, level_size[i - 1]);
-    if (output_level_ == -1 || ratio < output_level_ratio) {
-      output_level_ratio = ratio;
-      output_level_ = i;
-    }
-  }
+    return level;
+  };
+  output_level_ = get_output_level(start_level);
   if (output_level_ == -1) {
-    return nullptr;
+    output_level_ = 1;
   }
   auto& lvN = vstorage_->LevelFiles(output_level_);
   if (compaction_picker_->level0_compactions_in_progress()->empty()) {
@@ -1355,6 +1360,8 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
       if (output_level_ > 1 &&
           (int)lv0.size() < mutable_cf_options_.level0_slowdown_writes_trigger) {
         break;
+      } else {
+        output_level_ = -1;
       }
       bool invalid = false;
       bool partial_removed = lv0.back()->partial_removed > 0;
@@ -1426,12 +1433,15 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     }
     compaction_inputs_.clear();
   }
-  if (output_level_ <= start_level) {
-    return nullptr;
+  if (output_level_ == -1) {
+    output_level_ = get_output_level(start_level + 1);
+    if (output_level_ <= start_level) {
+      return nullptr;
+    }
   }
   struct RangeScore : public CompactionInputFilesRange {
-    FileMetaData* meta = nullptr;
-    int start = 0;
+    int start_level = 0;
+    size_t file_size = 0;
     double score = 0;
   };
   std::vector<RangeScore> score_vec;
@@ -1455,12 +1465,21 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     auto meta = lvR[i];
     RangeScore rs;
     if (range_level == output_level_) {
-      rs.meta = meta;
+      rs.file_size +=
+          meta->fd.GetFileSize() * (100 - meta->partial_removed) / 100;
     }
     rs.smallest = &meta->smallest();
     rs.largest = &meta->largest();
     score_vec.emplace_back(rs);
-    rs.meta = nullptr;
+    if (i > 0) {
+      auto file = lvR[i - 1];
+      rs.smallest = &file->smallest();
+      if (range_level == output_level_) {
+        rs.file_size +=
+            file->fd.GetFileSize() * (100 - file->partial_removed) / 100;
+      }
+      score_vec.emplace_back(rs);
+    }
     rs.smallest = &meta->largest();
     rs.flags = RangeScore::kSmallestOpen;
     if (i + 1 < lvR.size()) {
@@ -1470,10 +1489,12 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     else {
       rs.largest = nullptr;
     }
+    rs.file_size = 0;
     score_vec.emplace_back(rs);
   }
   for (auto& rs : score_vec) {
-    rs.start = output_level_;
+    rs.start_level = output_level_;
+    size_t purge = 0;
     for (Compaction* c : *compaction_picker_->compactions_in_progress()) {
       if (c->output_level() != output_level_) {
         continue;
@@ -1491,7 +1512,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     if (rs.score < 0) {
       continue;
     }
-    for (int &l = rs.start; l >= start_level; --l) {
+    for (int &l = rs.start_level; l >= start_level; --l) {
       auto lv = vstorage_->LevelFiles(l);
       double score = 0;
       auto overlap = find_operlap_range(lv, rs);
@@ -1517,17 +1538,20 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
                 (lv[i]->partial_removed / 100.0)
             ) * m * (output_level_ - l) *
             lv[i]->fd.GetFileSize() * (100 - lv[i]->partial_removed) / 100;
+        purge +=
+            lv[i]->fd.GetFileSize() * lv[i]->partial_removed / 100;
       }
       if (score < 0) {
         break;
       }
       rs.score += score;
     }
-    if (rs.meta != nullptr) {
-      rs.score /= rs.meta->fd.GetFileSize() * (100 - rs.meta->partial_removed) / 100;
+    if (rs.file_size != 0) {
+      rs.score /= rs.file_size;
     } else {
       rs.score /= file_size;
     }
+    rs.score += purge / file_size;
   }
   auto find = std::max_element(
                   score_vec.begin(), score_vec.end(),
@@ -1537,7 +1561,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
   if (find != score_vec.end() && find->score > 1.1) {
     auto& rs = *find;
     CompactionInputFiles files;
-    for (int l = rs.start + 1; l <= output_level_; ++l) {
+    for (int l = rs.start_level + 1; l <= output_level_; ++l) {
       auto lv = vstorage_->LevelFiles(l);
       files.level = l;
       files.files.clear();

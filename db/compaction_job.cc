@@ -63,12 +63,12 @@
 
 namespace rocksdb {
 
-std::vector<InternalKey> MergeRangeSet(
-    const std::vector<InternalKey>& range_set,
-    const std::vector<InternalKey>& erase_set,
-    const InternalKeyComparator& ic,
-    InternalIterator* iter) {
-  std::vector<InternalKey> output;
+void MergeRangeSet(const std::vector<InternalKey>& range_set,
+                   const std::vector<InternalKey>& erase_set,
+                   std::vector<InternalKey>& output,
+                   const InternalKeyComparator& ic,
+                   InternalIterator* iter) {
+  output.clear();
   assert(!range_set.empty());
   assert(!erase_set.empty());
   assert(range_set.size() % 2 == 0);
@@ -150,7 +150,6 @@ std::vector<InternalKey> MergeRangeSet(
     ei += ec;
   } while (ri != range_set.size() || ei != erase_set.size());
   assert(output.size() % 2 == 0);
-  return output;
 }
 
 struct PartialRemoveInfo {
@@ -164,29 +163,28 @@ struct PartialRemoveMetaData {
   std::vector<InternalKey> range_set;
   uint64_t partial_removed = 0;
 
-  PartialRemoveMetaData(FileMetaData* file,
-                        const std::vector<InternalKey>& erase_set,
-                        const InternalKeyComparator& ic) {
+  // return changed
+  bool InitFrom(FileMetaData* file,
+                const std::vector<InternalKey>& erase_set,
+                const InternalKeyComparator& ic) {
     if (erase_set.empty()) {
-      range_set = file->range_set;
-      partial_removed = file->partial_removed;
-      return;
+      return false;
     }
     auto table_reader = file->fd.table_reader;
     assert(table_reader);
     std::unique_ptr<InternalIterator> iter(
         table_reader->NewIterator(ReadOptions()));
-    range_set = std::move(MergeRangeSet(file->range_set, erase_set, ic, iter.get()));
+    MergeRangeSet(file->range_set, erase_set, range_set, ic, iter.get());
     if (range_set.empty()) {
-      return;
+      partial_removed = 100;
+      return true;
     }
     if (range_set.size() == file->range_set.size()
         && std::equal(range_set.begin(), range_set.end(), file->range_set.begin(),
         [&](const InternalKey& l, const InternalKey& r) {
       return ic.Compare(l, r) == 0;
     })) {
-      partial_removed = file->partial_removed;
-      return;
+      return false;
     }
     iter->SeekToLast();
     size_t sst_size = std::max<uint64_t>(1,
@@ -201,6 +199,7 @@ struct PartialRemoveMetaData {
     }
     partial_removed = std::min<uint64_t>(99, std::max<uint64_t>(1,
         (std::max(alive_size, sst_size) - alive_size) * 100 / sst_size));
+    return true;
   }
 };
 
@@ -878,9 +877,10 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       range_set->back().DecodeFrom(input->key());
     }
     if (!erase_set.empty()) {
-      *range_set = MergeRangeSet(*range_set, erase_set,
-                                 cfd->ioptions()->internal_comparator,
-                                 input.get());
+      std::vector<InternalKey> new_range_set;
+      MergeRangeSet(*range_set, erase_set, new_range_set,
+                    cfd->ioptions()->internal_comparator, input.get());
+      range_set->swap(new_range_set);
     }
     if (range_set->empty()) {
       delete range_set;
@@ -1538,9 +1538,6 @@ Status CompactionJob::InstallCompactionResults(
         compaction->InputLevelSummary(&inputs_summary), compact_->total_bytes);
   }
 
-  // Add compaction outputs
-  compaction->AddInputDeletions(compact_->compaction->edit());
-
   auto& ic = compaction->column_family_data()->internal_comparator();
   // collect partial remove info
   if (compaction->input_range() != nullptr ||
@@ -1565,7 +1562,14 @@ Status CompactionJob::InstallCompactionResults(
     auto inputs = compaction->inputs();
     for (auto& level : *inputs) {
       for (auto& file : level.files) {
-        PartialRemoveMetaData meta(file, erase_set, ic);
+        PartialRemoveMetaData meta;
+        if (!meta.InitFrom(file, erase_set, ic)) {
+          // unchanged sst
+          continue;
+        }
+        // should delete first
+        compaction->edit()->DeleteFile(level.level, file->fd.GetNumber());
+        // then reclaim
         if (!meta.range_set.empty()) {
           compaction->edit()->AddFile(
               level.level, file->fd.GetNumber(),
@@ -1576,7 +1580,10 @@ Status CompactionJob::InstallCompactionResults(
         }
       }
     }
+  } else {
+    compaction->AddInputDeletions(compact_->compaction->edit());
   }
+  // Add compaction outputs
   for (const auto& sub_compact : compact_->sub_compact_states) {
     for (const auto& out : sub_compact.outputs) {
       compaction->edit()->AddFile(compaction->output_level(), out.meta);
