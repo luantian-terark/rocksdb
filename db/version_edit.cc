@@ -111,8 +111,7 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
       return false;
     }
     bool has_customized_fields = false;
-    if (f.marked_for_compaction || f.partial_removed ||
-        f.range_set.size() > 2) {
+    if (f.marked_for_compaction || f.partial_removed) {
       PutVarint32(dst, kNewFile4);
       has_customized_fields = true;
     } else if (f.fd.GetPathId() == 0) {
