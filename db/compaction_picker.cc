@@ -1340,7 +1340,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
         continue;
       }
       double ratio = double(level_size[i]) / std::max<size_t>(1, level_size[i - 1]);
-      if (output_level_ == -1 || ratio < level_ratio) {
+      if (level == -1 || ratio < level_ratio) {
         level_ratio = ratio;
         level = i;
       }
@@ -1457,42 +1457,43 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     return nullptr;
   }
   score_vec.reserve(lv_range.size() * 3);
-  {
-    RangeScore rs;
-    rs.flags = RangeScore::kLargestOpen;
-    rs.largest = &lv_range.front()->smallest();
-    score_vec.emplace_back(rs);
-  }
   for (size_t i = 0; i < lv_range.size(); ++i) {
     auto meta = lv_range[i];
     RangeScore rs;
-    if (range_level == output_level_) {
-      rs.file_size +=
-          meta->fd.GetFileSize() * (100 - meta->partial_removed) / 100;
+    if (i == 0) {
+      rs.smallest = nullptr;
+    } else {
+      auto prev = lv_range[i - 1];
+      rs.smallest = &prev->largest();
+      rs.flags = RangeScore::kSmallestOpen;
     }
-    rs.smallest = &meta->smallest();
-    rs.largest = &meta->largest();
+    if (i + 1 == lv_range.size()) {
+      rs.largest = nullptr;
+    } else {
+      auto next = lv_range[i + 1];
+      rs.largest = &next->smallest();
+      rs.flags |= RangeScore::kLargestOpen;
+    }
     score_vec.emplace_back(rs);
-    if (i > 0) {
-      auto file = lv_range[i - 1];
-      rs.smallest = &file->smallest();
-      if (range_level == output_level_) {
-        rs.file_size +=
-            file->fd.GetFileSize() * (100 - file->partial_removed) / 100;
-      }
-      score_vec.emplace_back(rs);
-    }
+
     rs.smallest = &meta->largest();
     rs.flags = RangeScore::kSmallestOpen;
-    if (i + 1 < lv_range.size()) {
-      rs.flags |= RangeScore::kLargestOpen;
-      rs.largest = &lv_range[i + 1]->smallest();
-    }
-    else {
+    if (i + 1 == lv_range.size()) {
       rs.largest = nullptr;
+    } else {
+      auto next = lv_range[i + 1];
+      rs.largest = &next->smallest();
+      rs.flags |= RangeScore::kLargestOpen;
     }
-    rs.file_size = 0;
     score_vec.emplace_back(rs);
+
+    if (i != 0 && lv_range.size() >= 2) {
+      auto prev = lv_range[i - 1];
+      rs.smallest = &prev->smallest();
+      rs.largest = &meta->largest();
+      rs.flags = 0;
+      score_vec.emplace_back(rs);
+    }
   }
   for (auto& rs : score_vec) {
     rs.start_level = output_level_;
@@ -1534,12 +1535,18 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
           score = -1;
           break;
         }
+        auto meta = lv[i];
+        size_t size =
+            meta->fd.GetFileSize() * (100 - meta->partial_removed) / 100;
+        if (l == output_level_) {
+          rs.file_size += size;
+        }
         score +=
-            ((lv[i]->marked_for_compaction ? 2 : 1) + 
-                (lv[i]->partial_removed / 100.0)
-            ) * m * (output_level_ - l) *
-            lv[i]->fd.GetFileSize() * (100 - lv[i]->partial_removed) / 100 +
-            lv[i]->fd.GetFileSize() * lv[i]->partial_removed / 100;
+            size *
+                (meta->marked_for_compaction ? 2 : 1) *
+                (1 + m * (output_level_ - l)) +
+            meta->fd.GetFileSize() * meta->partial_removed / 100 *
+                output_level_;
       }
       if (score < 0) {
         break;
