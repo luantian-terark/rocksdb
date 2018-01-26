@@ -1442,6 +1442,15 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     }
   }
   struct RangeScore : public CompactionInputFilesRange {
+    RangeScore(const InternalKey* s, const InternalKey* l,
+               bool s_open = false, bool l_open = false) {
+      smallest = s;
+      largest = l;
+      flags = (s_open ? kSmallestOpen : kEmptyFlag) |
+              (l_open ? kLargestOpen : kEmptyFlag);
+    }
+    RangeScore() = default;
+    RangeScore(const RangeScore&) = default;
     int start_level = 0;
     size_t file_size = 0;
     double score = 0;
@@ -1457,6 +1466,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     return nullptr;
   }
   score_vec.reserve(lv_range.size() * 3);
+  score_vec.emplace_back(&lv_range.back()->largest(), nullptr, true, false);
   for (size_t i = 0; i < lv_range.size(); ++i) {
     auto meta = lv_range[i];
     RangeScore rs;
@@ -1467,32 +1477,16 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
       rs.smallest = &prev->largest();
       rs.flags = RangeScore::kSmallestOpen;
     }
-    if (i + 1 == lv_range.size()) {
-      rs.largest = nullptr;
-    } else {
-      auto next = lv_range[i + 1];
-      rs.largest = &next->smallest();
-      rs.flags |= RangeScore::kLargestOpen;
-    }
+    rs.largest = &meta->largest();
     score_vec.emplace_back(rs);
 
-    rs.smallest = &meta->largest();
-    rs.flags = RangeScore::kSmallestOpen;
-    if (i + 1 == lv_range.size()) {
-      rs.largest = nullptr;
-    } else {
-      auto next = lv_range[i + 1];
-      rs.largest = &next->smallest();
-      rs.flags |= RangeScore::kLargestOpen;
-    }
+    rs.largest = &meta->smallest();
+    rs.flags |= RangeScore::kLargestOpen;
     score_vec.emplace_back(rs);
 
     if (i != 0 && lv_range.size() >= 2) {
       auto prev = lv_range[i - 1];
-      rs.smallest = &prev->smallest();
-      rs.largest = &meta->largest();
-      rs.flags = 0;
-      score_vec.emplace_back(rs);
+      score_vec.emplace_back(&prev->smallest(), &meta->largest());
     }
   }
   for (auto& rs : score_vec) {
@@ -1545,8 +1539,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
             size *
                 (meta->marked_for_compaction ? 2 : 1) *
                 (1 + m * (output_level_ - l)) +
-            meta->fd.GetFileSize() * meta->partial_removed / 100 *
-                output_level_;
+            meta->fd.GetFileSize() * meta->partial_removed / 100;
       }
       if (score < 0) {
         break;
@@ -1560,7 +1553,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
                   [](const RangeScore& l, const RangeScore& r) {
                       return l.score < r.score;
                   });
-  if (find != score_vec.end() && find->score > 1.1) {
+  if (find != score_vec.end() && find->score > 2) {
     auto& rs = *find;
     CompactionInputFiles files;
     for (int l = rs.start_level + 1; l <= output_level_; ++l) {

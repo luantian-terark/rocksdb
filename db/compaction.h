@@ -37,7 +37,7 @@ struct CompactionInputFilesRange {
     kSmallestOpen   = 1 << 0,
     kLargestOpen    = 1 << 1,
   };
-  uint32_t flags = kEmptyFlag;
+  uint64_t flags = kEmptyFlag;
 };
 
 class Version;
