@@ -1313,14 +1313,6 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     }
     return overlap;
   };
-  auto find_operlap = [&](const std::vector<FileMetaData*>& files,
-                          const InternalKey* smallest,
-                          const InternalKey* largest) {
-    CompactionInputFilesRange range;
-    range.smallest = smallest;
-    range.largest = largest;
-    return find_operlap_range(files, range);
-  };
   int start_level = 1;
   size_t total_size = 1;
   std::vector<size_t> level_size;
