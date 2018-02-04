@@ -1272,8 +1272,8 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
   }
   auto& ic = ioptions_.internal_comparator;
   auto uc = ioptions_.internal_comparator.user_comparator();
-  auto find_operlap_range = [&ic](const std::vector<FileMetaData*>& files,
-                                  const CompactionInputFilesRange& range) {
+  auto find_operlap = [&ic](const std::vector<FileMetaData*>& files,
+                            const CompactionInputFilesRange& range) {
     InternalKey min_smallest;
     InternalKey max_largest;
     if (range.smallest != nullptr) {
@@ -1328,7 +1328,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
         mutable_cf_options_.MaxFileSizeForLevel(c->output_level());
   }
   const double m = mutable_cf_options_.max_bytes_for_level_multiplier;
-  auto get_output_level = [&](int start) {
+  auto get_compact_level = [&](int start) {
     auto sum = [](uint64_t a, uint64_t n, double q) {
       return a * (1 - std::pow(q, n)) / (1 - q);
     };
@@ -1351,23 +1351,21 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     double basic_size = (double)mutable_cf_options_.max_bytes_for_level_base;
     basic_size *= std::pow(min_q, start - 1);
     double level_ratio = 0;
-    int level = -1;
+    int level = 0;
     for (int i = start; i < vstorage_->num_levels(); ++i) {
-      if (level_size[i] < basic_size) {
-        double ratio = double(level_size[i] / basic_size);
-        if (level == -1 || ratio < level_ratio) {
+      double ratio = std::abs(basic_size - level_size[i]) / basic_size;
+      bool neg = basic_size < level_size[i];
+      if (level == 0 || ratio > level_ratio) {
+        if ((i != 1 || neg) &&
+            (i + 1 < vstorage_->num_levels() || !neg)) {
           level_ratio = ratio;
-          level = i;
+          level = neg ? -i : i;
         }
       }
       basic_size *= min_q;
     }
     return level;
   };
-  output_level_ = get_output_level(start_level);
-  if (output_level_ == -1) {
-    output_level_ = 1;
-  }
   std::vector<FileMetaData*> lv1_being_compacted;
   if (compaction_picker_->level0_compactions_in_progress()->empty()) {
     CompactionInputFilesRange range;
@@ -1408,7 +1406,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
       if (!lv1.empty()) {
         files.level = 1;
         files.files.clear();
-        auto overlap = find_operlap_range(lv1, range);
+        auto overlap = find_operlap(lv1, range);
         size_t target_size = mutable_cf_options_.MaxFileSizeForLevel(1);
         size_t size = 0;
         if (overlap.first <= overlap.second) {
@@ -1459,12 +1457,98 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     }
     compaction_inputs_.clear();
   }
-  if (output_level_ == 1) {
-    output_level_ = get_output_level(start_level + 1);
-    if (output_level_ <= start_level) {
-      return nullptr;
-    }
+  int compact_level = get_compact_level(start_level);
+  if (compact_level == 0) {
+    return nullptr;
   }
+  if (compact_level < 0) {
+    compact_level = -compact_level;
+    output_level_ = compact_level + 1;
+    auto& lv_output = vstorage_->LevelFiles(output_level_);
+    FileMetaData* imeta = nullptr;
+    std::pair<ptrdiff_t, ptrdiff_t> ioverlap;
+    for (auto meta : vstorage_->LevelFiles(compact_level)) {
+      if (meta->being_compacted ||
+          std::find(lv1_being_compacted.begin(), lv1_being_compacted.end(),
+                    meta) != lv1_being_compacted.end()) {
+        continue;
+      }
+      if (compaction_picker_->RangeOverlapWithCompaction(
+                                  meta->smallest().user_key(),
+                                  meta->largest().user_key(),
+                                  output_level_)) {
+        continue;
+      }
+      CompactionInputFilesRange range;
+      range.smallest = &meta->smallest();
+      range.largest = &meta->largest();
+      auto overlap = find_operlap(lv_output, range);
+      if (overlap.first <= overlap.second) {
+        for (auto i = overlap.first; i <= overlap.second; ++i) {
+          if (lv_output[i]->being_compacted) {
+            meta = nullptr;
+            break;
+          }
+        }
+        if (meta == nullptr) {
+          continue;
+        }
+      }
+      if (ioverlap.first == ioverlap.second) {
+        auto file = lv_output[ioverlap.first];
+        if (ic.Compare(meta->smallest(), file->smallest()) > 0 &&
+            ic.Compare(meta->largest(), file->largest()) < 0 &&
+            compaction_picker_->RangeOverlapWithCompaction(
+                                    meta->smallest().user_key(),
+                                    file->largest().user_key(),
+                                    output_level_)) {
+          continue;
+        }
+      }
+      if (imeta == nullptr ||
+          overlap.second - overlap.first < ioverlap.second - ioverlap.first ||
+          (overlap.second - overlap.first == ioverlap.second - ioverlap.first &&
+              meta->fd.GetNumber() < imeta->fd.GetNumber())) {
+        imeta = meta;
+        ioverlap = overlap;
+      }
+    }
+    if (imeta != nullptr) {
+      CompactionInputFiles files;
+      files.level = compact_level;
+      files.files = { imeta };
+      compaction_inputs_.emplace_back(std::move(files));
+      if (ioverlap.first <= ioverlap.second) {
+        files.level = output_level_;
+        files.files.clear();
+        if (ioverlap.first <= ioverlap.second) {
+          for (ptrdiff_t i = ioverlap.first; i <= ioverlap.second; ++i) {
+            files.files.emplace_back(lv_output[i]);
+          }
+          compaction_inputs_.emplace_back(std::move(files));
+          input_range_.smallest = &imeta->smallest();
+          input_range_.largest = &imeta->largest();
+          enable_input_range_ = true;
+          if (ioverlap.first == ioverlap.second) {
+            auto file = lv_output[ioverlap.first];
+            if (ic.Compare(imeta->smallest(), file->smallest()) > 0 &&
+                ic.Compare(imeta->largest(), file->largest()) < 0) {
+              assert(!compaction_picker_->RangeOverlapWithCompaction(
+                                              imeta->smallest().user_key(),
+                                              file->largest().user_key(),
+                                              output_level_));
+              input_range_.largest = &file->largest();
+            }
+          }
+        }
+      }
+      disable_subcompaction_ = true;
+      compaction_reason_ = CompactionReason::kLevelMaxLevelSize;
+      return GetCompaction();
+    }
+    return nullptr;
+  }
+  output_level_ = compact_level;
   struct RangeScore : public CompactionInputFilesRange {
     RangeScore(const InternalKey* s, const InternalKey* l,
                bool s_open = false, bool l_open = false) {
@@ -1479,7 +1563,6 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     size_t file_size = 0;
     double score = 0;
   };
-  std::sort(lv1_being_compacted.begin(), lv1_being_compacted.end());
   std::vector<RangeScore> score_vec;
   size_t file_size = mutable_cf_options_.MaxFileSizeForLevel(output_level_);
   int range_level = output_level_;
@@ -1531,12 +1614,12 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     for (int &l = rs.start_level; l >= start_level; --l) {
       auto lv = vstorage_->LevelFiles(l);
       double score = 0;
-      auto overlap = find_operlap_range(lv, rs);
+      auto overlap = find_operlap(lv, rs);
       if (overlap.first == overlap.second) {
         auto file = lv[overlap.first];
         if (file->being_compacted ||
-            std::binary_search(lv1_being_compacted.begin(),
-                               lv1_being_compacted.end(), file)) {
+            std::find(lv1_being_compacted.begin(), lv1_being_compacted.end(),
+                      file) != lv1_being_compacted.end()) {
           score = -1;
           break;
         }
@@ -1547,11 +1630,13 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
         }
       }
       for (ptrdiff_t i = overlap.first; i <= overlap.second; ++i) {
-        if (lv[i]->being_compacted) {
+        auto meta = lv[i];
+        if (meta->being_compacted ||
+            std::find(lv1_being_compacted.begin(), lv1_being_compacted.end(),
+                      meta) != lv1_being_compacted.end()) {
           score = -1;
           break;
         }
-        auto meta = lv[i];
         size_t size =
             meta->fd.GetFileSize() * (100 - meta->partial_removed) / 100;
         if (l == output_level_) {
@@ -1582,7 +1667,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
       auto lv = vstorage_->LevelFiles(l);
       files.level = l;
       files.files.clear();
-      auto overlap = find_operlap_range(lv, rs);
+      auto overlap = find_operlap(lv, rs);
       for (ptrdiff_t i = overlap.first; i <= overlap.second; ++i) {
         files.files.push_back(lv[i]);
       }
@@ -1598,7 +1683,7 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     input_range_ = rs;
     enable_input_range_ = true;
     start_level_score_ = rs.score;
-    compaction_reason_ = CompactionReason::kLevelMaxLevelSize;
+    compaction_reason_ = CompactionReason::kBottommostFiles;
     return GetCompaction();
   }
   return nullptr;
