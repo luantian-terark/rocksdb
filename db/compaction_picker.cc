@@ -1368,14 +1368,14 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
     return level;
   };
   std::vector<FileMetaData*> lv1_being_compacted;
-  if (compaction_picker_->level0_compactions_in_progress()->empty()) {
+  auto& lv0 = vstorage_->LevelFiles(0);
+  if (!lv0.empty() && !lv0.back()->being_compacted) {
     CompactionInputFilesRange range;
-    auto& lv0 = vstorage_->LevelFiles(0);
     auto& lv1 = vstorage_->LevelFiles(1);
     while ((int)lv0.size() >= mutable_cf_options_.level0_file_num_compaction_trigger) {
       bool invalid = false;
       bool partial_removed = lv0.back()->partial_removed > 0;
-      CompactionInputFiles files;
+      auto& files = start_level_inputs_;
       files.level = 0;
       for (auto rit = lv0.rbegin(); rit != lv0.rend(); ++rit) {
         auto meta = *rit;
@@ -1383,7 +1383,6 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
           break;
         }
         if (meta->being_compacted) {
-          invalid = true;
           break;
         }
         if (range.smallest == nullptr ||
@@ -1459,6 +1458,14 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
       return GetCompaction();
     }
     compaction_inputs_.clear();
+  }
+  if (compaction_picker_->level0_compactions_in_progress()->size() < 2 &&
+      PickIntraL0Compaction()) {
+    compaction_inputs_.emplace_back(std::move(start_level_inputs_));
+    output_level_ = 0;
+    enable_partial_remove_ = false;
+    compaction_reason_ = CompactionReason::kLevelL0FilesNum;
+    return GetCompaction();
   }
   int compact_level = get_compact_level(start_level);
   if (compact_level == 0) {
