@@ -973,7 +973,6 @@ class LevelCompactionBuilder {
         vstorage_(vstorage),
         compaction_picker_(compaction_picker),
         log_buffer_(log_buffer),
-        enable_partial_remove_(ioptions.enable_partial_remove),
         mutable_cf_options_(mutable_cf_options),
         ioptions_(ioptions) {}
 
@@ -1232,6 +1231,45 @@ bool LevelCompactionBuilder::SetupOtherInputsIfNeeded() {
                                         output_level_inputs_, &grandparents_);
   } else {
     compaction_inputs_.push_back(start_level_inputs_);
+  }
+  if (ioptions_.enable_partial_remove) {
+    // try shrink input range
+    auto& output_level_inputs = compaction_inputs_.back();
+    if (start_level_ < output_level_ &&
+        output_level_inputs.level == output_level_ &&
+        !output_level_inputs.files.empty()) {
+      assert(compaction_inputs_.size() == 2);
+      auto& start_level_inputs = compaction_inputs_.front();
+      auto& icmp = ioptions_.internal_comparator;
+      if (start_level_inputs.level == 0) {
+        for (size_t i = 0; i < start_level_inputs.files.size(); i++) {
+          FileMetaData* f = start_level_inputs[i];
+          if (i == 0) {
+            input_range_.smallest = &f->smallest();
+            input_range_.largest = &f->largest();
+          }
+          else {
+            if (icmp.Compare(f->smallest(), *input_range_.smallest) < 0) {
+              input_range_.smallest = &f->smallest();
+            }
+            if (icmp.Compare(f->largest(), *input_range_.largest) > 0) {
+              input_range_.largest = &f->largest();
+            }
+          }
+        }
+      } else {
+        input_range_.smallest = &start_level_inputs.files.front()->smallest();
+        input_range_.largest = &start_level_inputs.files.back()->largest();
+      }
+      // make sure output file not covered by single sst
+      if (output_level_inputs.files.size() > 1 ||
+          icmp.Compare(*input_range_.smallest,
+                       output_level_inputs.files.front()->smallest()) <= 0 ||
+          icmp.Compare(*input_range_.largest,
+                       output_level_inputs.files.back()->largest()) >= 0) {
+        enable_input_range_ = true;
+      }
+    }
   }
   return true;
 }
@@ -1702,7 +1740,8 @@ Compaction* LevelCompactionBuilder::PickCompactionPartialRemove() {
 Compaction* LevelCompactionBuilder::GetCompaction() {
   auto c = new Compaction(
       vstorage_, ioptions_, mutable_cf_options_, std::move(compaction_inputs_),
-      output_level_, mutable_cf_options_.MaxFileSizeForLevel(output_level_),
+      output_level_, mutable_cf_options_.MaxFileSizeForLevel(
+          std::max(0, output_level_ + 1 - vstorage_->base_level())),
       mutable_cf_options_.max_compaction_bytes,
       GetPathId(ioptions_, mutable_cf_options_, output_level_),
       GetCompressionType(ioptions_, vstorage_, mutable_cf_options_,
@@ -1874,9 +1913,6 @@ Compaction* LevelCompactionPicker::PickCompaction(
     VersionStorageInfo* vstorage, LogBuffer* log_buffer) {
   LevelCompactionBuilder builder(cf_name, vstorage, this, log_buffer,
                                  mutable_cf_options, ioptions_);
-  if (ioptions_.enable_partial_remove) {
-    return builder.PickCompactionPartialRemove();
-  }
   return builder.PickCompaction();
 }
 

@@ -915,9 +915,6 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     prev_prepare_write_nanos = IOSTATS(prepare_write_nanos);
   }
 
-  const MutableCFOptions* mutable_cf_options =
-      sub_compact->compaction->mutable_cf_options();
-
   // To build compression dictionary, we sample the first output file, assuming
   // it'll reach the maximum length. We optionally pass these samples through
   // zstd's dictionary trainer, or just use them directly. Then, the dictionary
@@ -931,8 +928,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   std::set<size_t> sample_begin_offsets;
   if (bottommost_level_ && kSampleBytes > 0) {
     const size_t kMaxSamples = kSampleBytes >> kSampleLenShift;
-    const size_t kOutFileLen = mutable_cf_options->MaxFileSizeForLevel(
-        compact_->compaction->output_level());
+    const size_t kOutFileLen = sub_compact->compaction->max_output_file_size();
     if (kOutFileLen != port::kMaxSizet) {
       const size_t kOutFileNumSamples = kOutFileLen >> kSampleLenShift;
       Random64 generator{versions_->NewFileNumber()};
