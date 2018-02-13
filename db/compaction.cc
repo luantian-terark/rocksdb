@@ -410,9 +410,19 @@ int InputSummary(const std::vector<FileMetaData*>& files, char* output,
     int sz = len - write;
     int ret;
     char sztxt[16];
-    AppendHumanBytes(files.at(i)->fd.GetFileSize(), sztxt, 16);
-    ret = snprintf(output + write, sz, "%" PRIu64 "(%s) ",
-                   files.at(i)->fd.GetNumber(), sztxt);
+    FileMetaData* f = files[i];
+    AppendHumanBytes(f->fd.GetFileSize(), sztxt, 16);
+    if (!f->partial_removed) {
+      ret = snprintf(output + write, sz, "%" PRIu64 "(%s) ",
+                     f->fd.GetNumber(), sztxt);
+    } else if (f->range_set.size() == 2) {
+      ret = snprintf(output + write, sz, "%" PRIu64 "(%s,%d%%) ",
+                     f->fd.GetNumber(), sztxt, 100 - f->partial_removed);
+    } else {
+      ret = snprintf(output + write, sz, "%" PRIu64 "(%s,%d%%,%zdFrags) ",
+                     f->fd.GetNumber(), sztxt, 100 - f->partial_removed,
+                     f->range_set.size() / 2);
+    }
     if (ret < 0 || ret >= sz) break;
     write += ret;
   }
