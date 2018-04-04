@@ -18,6 +18,157 @@
 
 namespace rocksdb {
 
+void MergeRangeSet(const std::vector<InternalKey>& range_set,
+                   const std::vector<InternalKey>& erase_set,
+                   std::vector<InternalKey>& output,
+                   const InternalKeyComparator& ic,
+                   InternalIterator* iter) {
+  output.clear();
+  assert(!range_set.empty());
+  assert(!erase_set.empty());
+  assert(range_set.size() % 2 == 0);
+  assert(erase_set.size() % 2 == 0);
+  size_t ri = 0, ei = 0;  // index
+  size_t rc, ec;          // change
+  auto put_left_bound = [&](const InternalKey& left, bool include) {
+    output.emplace_back();
+    iter->Seek(left.Encode());
+    if (iter->Valid()) {
+      if (include || iter->key() != left.Encode()) {
+        output.back().DecodeFrom(iter->key());
+      } else {
+        iter->Next();
+        if (iter->Valid()) {
+          output.back().DecodeFrom(iter->key());
+        }
+      }
+    }
+  };
+  auto put_right_bound = [&](const InternalKey& right, bool include) {
+    if (output.back().size() == 0) {
+      output.pop_back();
+      return;
+    }
+    output.emplace_back();
+    iter->SeekForPrev(right.Encode());
+    if (iter->Valid()) {
+      if (include || iter->key() != right.Encode()) {
+        output.back().DecodeFrom(iter->key());
+      } else {
+        iter->Prev();
+        if (iter->Valid()) {
+          output.back().DecodeFrom(iter->key());
+        }
+      }
+    }
+    if (output.back().size() == 0 ||
+        ic.Compare(output.end()[-2], output.back()) > 0) {
+      output.pop_back();
+      output.pop_back();
+    }
+  };
+
+  do {
+    int c;
+    if (ri < range_set.size() && ei < erase_set.size()) {
+      c = ic.Compare(range_set[ri], erase_set[ei]);
+    } else {
+      c = ri < range_set.size() ? -1 : 1;
+    }
+    rc = c <= 0;
+    ec = c >= 0;
+#define MergeRangeSet_CASE(a,b,c,d) ((a) | ((b) << 1) | ((c) << 2) | ((d) << 3))
+    switch (MergeRangeSet_CASE(ri % 2, ei % 2, rc, ec)) {
+    // out range , out erase , begin range
+    case MergeRangeSet_CASE(0, 0, 1, 0):
+      put_left_bound(range_set[ri], true);
+      break;
+    // in range , out erase , end range
+    case MergeRangeSet_CASE(1, 0, 1, 0):
+      put_right_bound(range_set[ri], true);
+      break;
+    // in range , out erase , begin erase
+    case MergeRangeSet_CASE(1, 0, 0, 1):
+    // in range , out erase , end range & begin erase
+    case MergeRangeSet_CASE(1, 0, 1, 1):
+      put_right_bound(erase_set[ei], false);
+      break;
+    // in range , in erase ,  end erase
+    case MergeRangeSet_CASE(1, 1, 0, 1):
+    // out range , out erase , end range & begin range
+    case MergeRangeSet_CASE(0, 1, 1, 1):
+      put_left_bound(erase_set[ei], false);
+      break;
+    }
+#undef MergeRangeSet_CASE
+    ri += rc;
+    ei += ec;
+  } while (ri != range_set.size() || ei != erase_set.size());
+  assert(output.size() % 2 == 0);
+}
+
+bool PartialRemovedMetaData::InitFrom(FileMetaData* file,
+                                      const std::vector<InternalKey>& erase_set,
+                                      uint8_t output_level,
+                                      ColumnFamilyData* cfd,
+                                      const EnvOptions& env_opt) {
+  meta = file;
+  compact_output_level = output_level;
+  if (erase_set.empty()) {
+    return false;
+  }
+  const InternalKeyComparator& ic = cfd->ioptions()->internal_comparator;
+  TableReader* table_reader = nullptr;
+  auto table_cache = cfd->table_cache();
+  std::unique_ptr<InternalIterator> iter(
+      table_cache->NewIterator(ReadOptions(), env_opt, ic, *file, nullptr,
+                               &table_reader, nullptr, false, nullptr,
+                               false, -1, true));
+  assert(table_reader);
+  MergeRangeSet(file->range_set, erase_set, range_set, ic, iter.get());
+  if (range_set.empty()) {
+    partial_removed = 100;
+    return true;
+  }
+  if (range_set.size() == file->range_set.size() &&
+      std::equal(range_set.begin(), range_set.end(), file->range_set.begin(),
+      [&](const InternalKey& l, const InternalKey& r) {
+    return ic.Compare(l, r) == 0;
+  })) {
+    return false;
+  }
+  iter->SeekToLast();
+  size_t sst_size = std::max<uint64_t>(1,
+      table_reader->ApproximateOffsetOf(iter->key()));
+  size_t alive_size = 0;
+  for (size_t i = 0; i < range_set.size(); i += 2) {
+    uint64_t left_offset =
+        table_reader->ApproximateOffsetOf(range_set[i].Encode());
+    uint64_t right_offset =
+        table_reader->ApproximateOffsetOf(range_set[i + 1].Encode());
+    alive_size += right_offset - left_offset;
+  }
+  partial_removed =
+      (uint8_t)std::min<uint64_t>(
+          99, std::max<uint64_t>(
+                  1, (std::max(alive_size,
+                               sst_size) - alive_size) * 100 / sst_size));
+  return true;
+}
+
+FileMetaData PartialRemovedMetaData::Get() {
+  FileMetaData f;
+  f.fd = FileDescriptor(meta->fd.GetNumber(), meta->fd.GetPathId(),
+                        meta->fd.GetFileSize());
+  f.range_set = std::move(range_set);
+  f.smallest_seqno = meta->smallest_seqno;
+  f.largest_seqno = meta->largest_seqno;
+  f.marked_for_compaction = meta->marked_for_compaction;
+  f.partial_removed = partial_removed;
+  f.compact_output_level = compact_output_level;
+  return f;
+}
+
 // Tag numbers for serialized VersionEdit.  These numbers are written to
 // disk and should not be changed.
 enum Tag {
@@ -45,7 +196,8 @@ enum CustomTag {
   kTerminate = 1,  // The end of customized fields
   kNeedCompaction = 2,
   kPartialRemoved = 3,
-  kExpandRangeSet = 4,
+  kCompactOutputLevel = 4,
+  kExpandRangeSet = 5,
   kPathId = 65,
 };
 // If this bit for the custom tag is set, opening DB should fail if
@@ -111,7 +263,8 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
       return false;
     }
     bool has_customized_fields = false;
-    if (f.marked_for_compaction || f.partial_removed) {
+    if (f.marked_for_compaction || f.partial_removed ||
+        f.compact_output_level) {
       PutVarint32(dst, kNewFile4);
       has_customized_fields = true;
     } else if (f.fd.GetPathId() == 0) {
@@ -170,6 +323,11 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
       if (f.partial_removed) {
         PutVarint32(dst, CustomTag::kPartialRemoved);
         char p = static_cast<char>(f.partial_removed);
+        PutLengthPrefixedSlice(dst, Slice(&p, 1));
+      }
+      if (f.compact_output_level) {
+        PutVarint32(dst, CustomTag::kCompactOutputLevel);
+        char p = static_cast<char>(f.compact_output_level);
         PutLengthPrefixedSlice(dst, Slice(&p, 1));
       }
       for (size_t j = 1; j < f.range_set.size() - 1; ++j) {
@@ -272,6 +430,13 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
           }
           f.partial_removed = static_cast<uint8_t>(field[0]);
           break;
+        case kCompactOutputLevel:
+          if (field.size() != 1) {
+            return "compact_output_level field wrong size";
+          }
+          f.compact_output_level = static_cast<uint8_t>(field[0]);
+          break;
+          
         case kExpandRangeSet:
           f.range_set.emplace_back();
           f.range_set.back().DecodeFrom(field);

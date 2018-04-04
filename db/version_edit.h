@@ -21,6 +21,9 @@
 namespace rocksdb {
 
 class VersionSet;
+class InternalIterator;
+struct FileMetaData;
+class ColumnFamilyData;
 
 const uint64_t kFileNumberMask = 0x3FFFFFFFFFFFFFFF;
 
@@ -73,6 +76,30 @@ struct FileSampledStats {
   mutable std::atomic<uint64_t> num_reads_sampled;
 };
 
+
+void MergeRangeSet(const std::vector<InternalKey>& range_set,
+                   const std::vector<InternalKey>& erase_set,
+                   std::vector<InternalKey>& output,
+                   const InternalKeyComparator& ic,
+                   InternalIterator* iter);
+
+struct PartialRemovedMetaData {
+  std::vector<InternalKey> range_set;
+  FileMetaData* meta;
+  uint8_t partial_removed = 0;
+  uint8_t compact_output_level = 0;
+
+  // return changed
+  // if output_level non-zero , this sst is reclaim from compact
+  bool InitFrom(FileMetaData* file,
+                const std::vector<InternalKey>& erase_set,
+                uint8_t output_level,
+                ColumnFamilyData* cfd,
+                const EnvOptions& env_opt);
+
+  FileMetaData Get();
+};
+
 struct FileMetaData {
   FileDescriptor fd;
   std::vector<InternalKey> range_set; // valid range set
@@ -115,6 +142,11 @@ struct FileMetaData {
 
   uint8_t partial_removed;     // iterator need wrapper if non zero
 
+  // If non-zero , this sst reclaim from compaction job with partial remove
+  //   or compaction inout range .
+  // partial remove will not worked on lv0 -> lv0 compact
+  uint8_t compact_output_level;
+
   FileMetaData()
       : smallest_seqno(kMaxSequenceNumber),
         largest_seqno(0),
@@ -128,7 +160,8 @@ struct FileMetaData {
         being_compacted(false),
         init_stats_from_file(false),
         marked_for_compaction(false),
-        partial_removed(0) {
+        partial_removed(0),
+        compact_output_level(0) {
     range_set.resize(2);
   }
 
@@ -218,7 +251,8 @@ class VersionEdit {
                uint64_t file_size, const std::vector<InternalKey>& range_set,
                const SequenceNumber& smallest_seqno,
                const SequenceNumber& largest_seqno,
-               bool marked_for_compaction, uint8_t partial_removed) {
+               bool marked_for_compaction, uint8_t partial_removed,
+               uint8_t compact_output_level) {
     assert(smallest_seqno <= largest_seqno);
     FileMetaData f;
     f.fd = FileDescriptor(file, file_path_id, file_size);
@@ -227,6 +261,7 @@ class VersionEdit {
     f.largest_seqno = largest_seqno;
     f.marked_for_compaction = marked_for_compaction;
     f.partial_removed = partial_removed;
+    f.compact_output_level = compact_output_level;
     new_files_.emplace_back(level, std::move(f));
   }
 

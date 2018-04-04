@@ -57,7 +57,8 @@ class TableCache {
       const FileMetaData& file_meta, RangeDelAggregator* range_del_agg,
       TableReader** table_reader_ptr = nullptr,
       HistogramImpl* file_read_hist = nullptr, bool for_compaction = false,
-      Arena* arena = nullptr, bool skip_filters = false, int level = -1);
+      Arena* arena = nullptr, bool skip_filters = false, int level = -1,
+      bool ignore_partial_remove = false);
 
   InternalIterator* NewRangeTombstoneIterator(
       const ReadOptions& options, const EnvOptions& toptions,

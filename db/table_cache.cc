@@ -173,7 +173,7 @@ InternalIterator* TableCache::NewIterator(
     const InternalKeyComparator& icomparator, const FileMetaData& meta,
     RangeDelAggregator* range_del_agg, TableReader** table_reader_ptr,
     HistogramImpl* file_read_hist, bool for_compaction, Arena* arena,
-    bool skip_filters, int level) {
+    bool skip_filters, int level, bool ignore_partial_remove) {
   PERF_TIMER_GUARD(new_table_iterator_nanos);
 
   auto& fd = meta.fd;
@@ -231,7 +231,7 @@ InternalIterator* TableCache::NewIterator(
       result = NewEmptyInternalIterator(arena);
     } else {
       result = table_reader->NewIterator(options, arena, skip_filters);
-      if (meta.partial_removed) {
+      if (!ignore_partial_remove && meta.partial_removed) {
         auto wrapper = NewRangeWrappedInternalIterator(
             result, icomparator, &meta.range_set, arena);
         wrapper->RegisterCleanup([](void* arg1, void* arg2) {
