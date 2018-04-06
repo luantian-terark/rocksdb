@@ -39,16 +39,10 @@ public:
     return !invalid_ && iter_->Valid();
   }
   void SeekToFirst() override final {
-    smallest_ = &range_set_->front();
-    largest_ = smallest_ + 1;
-    invalid_ = false;
-    Seek(smallest_->Encode());
+    Seek(range_set_->front().Encode());
   }
   void SeekToLast() override final {
-    largest_ = &range_set_->back();
-    smallest_ = largest_ - 1;
-    invalid_ = false;
-    SeekForPrev(largest_->Encode());
+    SeekForPrev(range_set_->back().Encode());
   }
   void Seek(const Slice& target) override final {
     Slice s = target;

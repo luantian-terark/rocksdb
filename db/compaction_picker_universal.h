@@ -60,6 +60,10 @@ class UniversalCompactionPicker : public CompactionPicker {
     bool being_compacted;
   };
 
+  Compaction* PickCompactionConitnue(
+    const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
+    VersionStorageInfo* vstorage, LogBuffer* log_buffer);
+
   Compaction* TrivialMovePickCompaction(
       const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
       VersionStorageInfo* vstorage, LogBuffer* log_buffer);

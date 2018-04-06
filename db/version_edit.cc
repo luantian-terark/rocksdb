@@ -113,8 +113,10 @@ bool PartialRemovedMetaData::InitFrom(FileMetaData* file,
                                       ColumnFamilyData* cfd,
                                       const EnvOptions& env_opt) {
   meta = file;
-  compact_output_level = output_level;
+  partial_removed = file->partial_removed;
+  compact_to_level = output_level;
   if (erase_set.empty()) {
+    range_set = file->range_set;
     return false;
   }
   const InternalKeyComparator& ic = cfd->ioptions()->internal_comparator;
@@ -157,6 +159,7 @@ bool PartialRemovedMetaData::InitFrom(FileMetaData* file,
 }
 
 FileMetaData PartialRemovedMetaData::Get() {
+  assert(partial_removed < 100);
   FileMetaData f;
   f.fd = FileDescriptor(meta->fd.GetNumber(), meta->fd.GetPathId(),
                         meta->fd.GetFileSize());
@@ -165,7 +168,7 @@ FileMetaData PartialRemovedMetaData::Get() {
   f.largest_seqno = meta->largest_seqno;
   f.marked_for_compaction = meta->marked_for_compaction;
   f.partial_removed = partial_removed;
-  f.compact_output_level = compact_output_level;
+  f.compact_to_level = compact_to_level;
   return f;
 }
 
@@ -196,7 +199,7 @@ enum CustomTag {
   kTerminate = 1,  // The end of customized fields
   kNeedCompaction = 2,
   kPartialRemoved = 3,
-  kCompactOutputLevel = 4,
+  kCompactToLevel = 4,
   kExpandRangeSet = 5,
   kPathId = 65,
 };
@@ -264,7 +267,7 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
     }
     bool has_customized_fields = false;
     if (f.marked_for_compaction || f.partial_removed ||
-        f.compact_output_level) {
+        f.compact_to_level) {
       PutVarint32(dst, kNewFile4);
       has_customized_fields = true;
     } else if (f.fd.GetPathId() == 0) {
@@ -325,9 +328,9 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
         char p = static_cast<char>(f.partial_removed);
         PutLengthPrefixedSlice(dst, Slice(&p, 1));
       }
-      if (f.compact_output_level) {
-        PutVarint32(dst, CustomTag::kCompactOutputLevel);
-        char p = static_cast<char>(f.compact_output_level);
+      if (f.compact_to_level) {
+        PutVarint32(dst, CustomTag::kCompactToLevel);
+        char p = static_cast<char>(f.compact_to_level);
         PutLengthPrefixedSlice(dst, Slice(&p, 1));
       }
       for (size_t j = 1; j < f.range_set.size() - 1; ++j) {
@@ -430,11 +433,11 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
           }
           f.partial_removed = static_cast<uint8_t>(field[0]);
           break;
-        case kCompactOutputLevel:
+        case kCompactToLevel:
           if (field.size() != 1) {
-            return "compact_output_level field wrong size";
+            return "compact_to_level field wrong size";
           }
-          f.compact_output_level = static_cast<uint8_t>(field[0]);
+          f.compact_to_level = static_cast<uint8_t>(field[0]);
           break;
           
         case kExpandRangeSet:

@@ -87,7 +87,7 @@ struct PartialRemovedMetaData {
   std::vector<InternalKey> range_set;
   FileMetaData* meta;
   uint8_t partial_removed = 0;
-  uint8_t compact_output_level = 0;
+  uint8_t compact_to_level = 0;
 
   // return changed
   // if output_level non-zero , this sst is reclaim from compact
@@ -145,7 +145,7 @@ struct FileMetaData {
   // If non-zero , this sst reclaim from compaction job with partial remove
   //   or compaction inout range .
   // partial remove will not worked on lv0 -> lv0 compact
-  uint8_t compact_output_level;
+  uint8_t compact_to_level;
 
   FileMetaData()
       : smallest_seqno(kMaxSequenceNumber),
@@ -161,7 +161,7 @@ struct FileMetaData {
         init_stats_from_file(false),
         marked_for_compaction(false),
         partial_removed(0),
-        compact_output_level(0) {
+        compact_to_level(0) {
     range_set.resize(2);
   }
 
@@ -252,7 +252,7 @@ class VersionEdit {
                const SequenceNumber& smallest_seqno,
                const SequenceNumber& largest_seqno,
                bool marked_for_compaction, uint8_t partial_removed,
-               uint8_t compact_output_level) {
+               uint8_t compact_to_level) {
     assert(smallest_seqno <= largest_seqno);
     FileMetaData f;
     f.fd = FileDescriptor(file, file_path_id, file_size);
@@ -261,7 +261,7 @@ class VersionEdit {
     f.largest_seqno = largest_seqno;
     f.marked_for_compaction = marked_for_compaction;
     f.partial_removed = partial_removed;
-    f.compact_output_level = compact_output_level;
+    f.compact_to_level = compact_to_level;
     new_files_.emplace_back(level, std::move(f));
   }
 

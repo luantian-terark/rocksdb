@@ -58,7 +58,7 @@ class Compaction {
              bool manual_compaction = false, double score = -1,
              bool deletion_compaction = false, bool disable_subcompaction = false,
              bool enable_partial_remove = false,
-             const CompactionInputFilesRange* input_range = nullptr,
+             const std::vector<CompactionInputFilesRange>& input_range = {},
              CompactionReason compaction_reason = CompactionReason::kUnknown);
 
   // No copying allowed
@@ -148,8 +148,8 @@ class Compaction {
   bool enable_partial_remove() const { return enable_partial_remove_; }
 
   // See CompactionInputFilesRange declare above
-  const CompactionInputFilesRange* input_range() const {
-    return enable_input_range_ ? &input_range_ : nullptr;
+  const std::vector<CompactionInputFilesRange>& input_range() const {
+    return input_range_;
   };
 
   // Add all inputs to this compaction as delete operations to *edit.
@@ -311,8 +311,7 @@ class Compaction {
   const bool enable_partial_remove_;
 
   // See CompactionInputFilesRange declare above
-  const bool enable_input_range_;
-  const CompactionInputFilesRange input_range_;
+  const std::vector<CompactionInputFilesRange> input_range_;
 
   // Compaction input files organized by level. Constant after construction
   const std::vector<CompactionInputFiles> inputs_;

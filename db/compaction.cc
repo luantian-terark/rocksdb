@@ -162,7 +162,7 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
                        bool _manual_compaction, double _score,
                        bool _deletion_compaction, bool _disable_subcompaction,
                        bool _enable_partial_remove,
-                       const CompactionInputFilesRange* _input_range,
+                       const std::vector<CompactionInputFilesRange>& _input_range,
                        CompactionReason _compaction_reason)
     : input_vstorage_(vstorage),
       start_level_(_inputs[0].level),
@@ -179,8 +179,7 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
       deletion_compaction_(_deletion_compaction),
       disable_subcompaction_(_disable_subcompaction),
       enable_partial_remove_(_enable_partial_remove),
-      enable_input_range_(!!_input_range),
-      input_range_(_input_range ? *_input_range : CompactionInputFilesRange()),
+      input_range_(_input_range),
       inputs_(std::move(_inputs)),
       grandparents_(std::move(_grandparents)),
       score_(_score),
@@ -212,16 +211,16 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
 
   GetBoundaryKeys(vstorage, inputs_, &smallest_user_key_, &largest_user_key_);
   // shrink to input range
-  if (enable_input_range_) {
-    if (input_range_.smallest != nullptr &&
+  if (!input_range_.empty()) {
+    if (input_range_.front().smallest != nullptr &&
         ic.Compare(smallest_user_key_,
-                   input_range_.smallest->user_key()) < 0) {
-      smallest_user_key_ = input_range_.smallest->user_key();
+                   input_range_.front().smallest->user_key()) < 0) {
+      smallest_user_key_ = input_range_.front().smallest->user_key();
     }
-    if (input_range_.largest != nullptr &&
+    if (input_range_.back().largest != nullptr &&
         ic.Compare(largest_user_key_,
-                   input_range_.largest->user_key()) > 0) {
-      largest_user_key_ = input_range_.largest->user_key();
+                   input_range_.back().largest->user_key()) > 0) {
+      largest_user_key_ = input_range_.back().largest->user_key();
     }
   }
 }
