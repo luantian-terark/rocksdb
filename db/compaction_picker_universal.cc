@@ -421,6 +421,7 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
     VersionStorageInfo* vstorage, LogBuffer* log_buffer) {
   int start_level = 0;
   int output_level = 0;
+  // found some sst has compact_to_level
   for (int i = 0; i < vstorage->num_levels(); ++i) {
     for (auto f : vstorage->LevelFiles(i)) {
       if (f->compact_to_level) {
@@ -446,6 +447,7 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
   if (output_level == 0) {
     return nullptr;
   }
+  // fill inputs
   std::vector<CompactionInputFiles> inputs;
   std::vector<CompactionInputFilesRange> input_range;
   for (int i = start_level; i <= output_level; ++i) {
@@ -466,10 +468,10 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
     }
   }
   std::vector<FileMetaData*> overlap_files;
-  // check this sst can skip
-  auto can_skip = [&, this](FileMetaData* meta) {
+  // return true if this sst need compact
+  auto need_compact_file = [&, this](FileMetaData* meta) {
     if (meta->compact_to_level == output_level) {
-      return false;
+      return true;
     }
     Slice smallest = meta->smallest().user_key();
     Slice largest = meta->largest().user_key();
@@ -490,15 +492,15 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
         for (size_t i = 0; i < f->range_set.size(); i += 2) {
           if (ucmp->Compare(largest, f->range_set[i].user_key()) >= 0 &&
               ucmp->Compare(smallest, f->range_set[i + 1].user_key()) <= 0) {
-            return false;
+            return true;
           }
         }
       }
     }
-    return true;
+    return false;
   };
   // return true if no data between these tow sst
-  auto is_consecutive = [&, this](FileMetaData* left, FileMetaData* right) {
+  auto need_compact_between = [&, this](FileMetaData* left, FileMetaData* right) {
     const InternalKey* smallest = left ? &left->largest() : nullptr;
     const InternalKey* largest = right ? &right->smallest() : nullptr;
     auto ucmp = icmp_->user_comparator();
@@ -522,58 +524,67 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
               (smallest != nullptr &&
                ucmp->Compare(smallest->user_key(),
                              f->range_set[i + 1].user_key()) <= 0)) {
-            return false;
+            return true;
           }
         }
       }
     }
-    return true;
+    return false;
   };
+  // skip sst & calc input range
   if (inputs.back().level == output_level) {
     auto& files = inputs.back().files;
     assert(!files.empty());
-    std::vector<FileMetaData*> new_files;
-    int start = -1;
-    for (int i = 0; i < (int)files.size(); ++i) {
-      if (!can_skip(files[i])) {
-        new_files.emplace_back(files[i]);
-        if (start != -1) {
-          // range end
-          CompactionInputFilesRange range;
-          if (start > 0) {
-            range.smallest = &files[start - 1]->largest();
-            range.flags = CompactionInputFilesRange::kSmallestOpen;
-          }
-          range.largest = &files[i]->smallest();
-          range.flags |= CompactionInputFilesRange::kLargestOpen;
-          input_range.emplace_back(range);
-          start = -1;
-        }
-        continue;
-      } else if (i == 0 && !is_consecutive(nullptr, files.front())) {
-        // this case should be rare
+    auto push_range = [&](int start, int end) {
+      if (start != -1) {
+        // range
         CompactionInputFilesRange range;
-        range.largest = &files.front()->largest();
-        range.flags |= CompactionInputFilesRange::kLargestOpen;
+        if (start > 0) {
+          range.smallest = &files[start - 1]->largest();
+          range.flags = CompactionInputFilesRange::kSmallestOpen;
+        }
+        if (end < (int)files.size()) {
+          range.largest = &files[end]->smallest();
+          range.flags |= CompactionInputFilesRange::kLargestOpen;
+        }
         input_range.emplace_back(range);
       }
-      if (start == -1) {
-        // range begin
-        start = i;
-      } else if (!is_consecutive(files[i - 1], files[i])) {
+      else if (end == 0) {
+        if (need_compact_between(nullptr, files.front())) {
+          // this case should be rare
+          // head range
+          CompactionInputFilesRange range;
+          range.largest = &files.front()->largest();
+          range.flags |= CompactionInputFilesRange::kLargestOpen;
+          input_range.emplace_back(range);
+        }
+      } else if (need_compact_between(files[end - 1], files[end])) {
         // range break
         CompactionInputFilesRange range;
-        range.smallest = &files[i - 1]->largest();
-        range.largest = &files[i]->smallest();
+        range.smallest = &files[end - 1]->largest();
+        range.largest = &files[end]->smallest();
         range.flags = CompactionInputFilesRange::kSmallestOpen |
                       CompactionInputFilesRange::kLargestOpen;
         input_range.emplace_back(range);
-        start = i;
+      }
+    };
+    std::vector<FileMetaData*> new_files;
+    int start = -1;
+    for (int i = 0; i < (int)files.size(); ++i) {
+      if (need_compact_file(files[i])) {
+        new_files.emplace_back(files[i]);
+        if (start == -1) {
+          start = i;
+        }
+      } else {
+        push_range(start, i);
+        start = -1;
       }
     }
-    if (start > 0 &&
-        (start + 1 != files.size() || !is_consecutive(files.back(), nullptr))) {
-      // range end
+    if (start > 0) {
+      push_range(start, (int)files.size());
+    } else if (start == -1 && need_compact_between(files.back(), nullptr)) {
+      // tail range
       CompactionInputFilesRange range;
       range.smallest = &files[start]->largest();
       range.flags |= CompactionInputFilesRange::kSmallestOpen;
