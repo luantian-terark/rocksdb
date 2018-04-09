@@ -219,7 +219,7 @@ class Compaction {
   void SetInputVersion(Version* input_version);
 
   struct InputLevelSummaryBuffer {
-    char buffer[128];
+    char buffer[256];
   };
 
   const char* InputLevelSummary(InputLevelSummaryBuffer* scratch) const;

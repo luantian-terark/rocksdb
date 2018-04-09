@@ -432,7 +432,19 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
     }
     if (output_level != 0) {
       for (int i = level; i <= output_level; ++i) {
-        if (AreFilesInCompaction(vstorage->LevelFiles(i))) {
+        if (i == 0) {
+          for (auto f : vstorage->LevelFiles(0)) {
+            if (f->compact_to_level == output_level &&
+                f->being_compacted) {
+              level = output_level;
+              output_level = 0;
+              break;
+            }
+          }
+          if (output_level == 0) {
+            break;
+          }
+        } else if (AreFilesInCompaction(vstorage->LevelFiles(i))) {
           level = output_level;
           output_level = 0;
           break;

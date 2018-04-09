@@ -1067,8 +1067,9 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
             sub_compact->partial_remove_info.active = true;
             break;
           }
+        } else {
+          output_file_ended = false;
         }
-        output_file_ended = false;
       }
     }
     if (output_file_ended) {
