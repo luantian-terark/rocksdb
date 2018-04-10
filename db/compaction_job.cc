@@ -787,12 +787,14 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       delete range_set;
       input.reset(NewEmptyInternalIterator());
     } else {
+      auto iter = input.release();
       auto wrapper = NewRangeWrappedInternalIterator(
-                         input.release(), cfd->ioptions()->internal_comparator,
+                         iter, cfd->ioptions()->internal_comparator,
                          range_set, nullptr);
       wrapper->RegisterCleanup([](void* arg1, void* arg2) {
         delete reinterpret_cast<std::vector<InternalKey>*>(arg1);
-      }, range_set, nullptr);
+        delete reinterpret_cast<InternalIterator*>(arg2);
+      }, range_set, iter);
       input.reset(wrapper);
     }
   }

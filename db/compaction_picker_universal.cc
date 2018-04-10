@@ -203,7 +203,8 @@ void UniversalCompactionPicker::SortedRun::DumpSizeInfo(
 
 std::vector<UniversalCompactionPicker::SortedRun>
 UniversalCompactionPicker::CalculateSortedRuns(
-    const VersionStorageInfo& vstorage, const ImmutableCFOptions& ioptions) {
+    const VersionStorageInfo& vstorage, const ImmutableCFOptions& ioptions,
+    bool& need_continue) {
   std::vector<UniversalCompactionPicker::SortedRun> ret;
   for (FileMetaData* f : vstorage.LevelFiles(0)) {
     ret.emplace_back(0, f, f->fd.GetFileSize(), f->compensated_file_size,
@@ -218,7 +219,10 @@ UniversalCompactionPicker::CalculateSortedRuns(
       total_size += f->fd.GetFileSize();
       // If compact_to_level non-zero , these sst
       // need continue compact (assign by partial remove)
-      if (f->being_compacted || f->compact_to_level) {
+      if (f->compact_to_level) {
+        need_continue = true;
+        being_compacted = true;
+      } else if (f->being_compacted) {
         being_compacted = true;
       }
     }
@@ -238,8 +242,9 @@ Compaction* UniversalCompactionPicker::PickCompaction(
     VersionStorageInfo* vstorage, LogBuffer* log_buffer) {
   const int kLevel0 = 0;
   double score = vstorage->CompactionScore(kLevel0);
+  bool need_continue = false;
   std::vector<SortedRun> sorted_runs =
-      CalculateSortedRuns(*vstorage, ioptions_);
+      CalculateSortedRuns(*vstorage, ioptions_, need_continue);
 
   if (sorted_runs.size() == 0 ||
       sorted_runs.size() <
@@ -258,7 +263,8 @@ Compaction* UniversalCompactionPicker::PickCompaction(
 
   // Check for size amplification first.
   Compaction* c;
-  if ((c = PickCompactionConitnue(cf_name, mutable_cf_options, vstorage,
+  if (need_continue &&
+      (c = PickCompactionConitnue(cf_name, mutable_cf_options, vstorage,
                                   log_buffer)) != nullptr) {
     // continue compaction
   } else if ((c = TrivialMovePickCompaction(cf_name, mutable_cf_options,
