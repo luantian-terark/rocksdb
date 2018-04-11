@@ -1206,6 +1206,11 @@ void VersionStorageInfo::ComputeCompensatedSizes() {
               (file_meta->num_deletions * 2 - file_meta->num_entries) *
               average_value_size * kDeletionWeightOnCompaction;
         }
+        if (file_meta->partial_removed) {
+          file_meta->compensated_file_size =
+              file_meta->compensated_file_size *
+              (100 - file_meta->partial_removed) / 100;
+        }
       }
     }
   }
