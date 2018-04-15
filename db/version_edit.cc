@@ -28,8 +28,6 @@ void MergeRangeSet(const std::vector<InternalKey>& range_set,
   assert(!erase_set.empty());
   assert(range_set.size() % 2 == 0);
   assert(erase_set.size() % 2 == 0);
-  size_t ri = 0, ei = 0;  // index
-  size_t rc, ec;          // change
   auto put_left_bound = [&](const InternalKey& left, bool include) {
     output.emplace_back();
     iter->Seek(left.Encode());
@@ -67,7 +65,8 @@ void MergeRangeSet(const std::vector<InternalKey>& range_set,
       output.pop_back();
     }
   };
-
+  size_t ri = 0, ei = 0;  // index
+  size_t rc, ec;          // change
   do {
     int c;
     if (ri < range_set.size() && ei < erase_set.size()) {
@@ -95,7 +94,7 @@ void MergeRangeSet(const std::vector<InternalKey>& range_set,
       break;
     // in range , in erase ,  end erase
     case MergeRangeSet_CASE(1, 1, 0, 1):
-    // out range , out erase , end range & begin range
+    // out range , in erase , end range & begin range
     case MergeRangeSet_CASE(0, 1, 1, 1):
       put_left_bound(erase_set[ei], false);
       break;

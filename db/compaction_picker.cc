@@ -952,9 +952,6 @@ bool LevelCompactionPicker::NeedsCompaction(
       return true;
     }
   }
-  if (ioptions_.enable_partial_remove) {
-    return true;
-  }
   return false;
 }
 
@@ -1025,7 +1022,6 @@ class LevelCompactionBuilder {
   bool is_manual_ = false;
   bool disable_subcompaction_ = false;
   bool enable_partial_remove_ = false;
-  bool enable_input_range_ = false;
   CompactionInputFiles start_level_inputs_;
   std::vector<CompactionInputFilesRange> input_range_;
   std::vector<CompactionInputFiles> compaction_inputs_;
@@ -1267,7 +1263,6 @@ bool LevelCompactionBuilder::SetupOtherInputsIfNeeded() {
           icmp.Compare(*range.largest,
                        output_level_inputs.files.back()->largest()) >= 0) {
         input_range_.emplace_back(std::move(range));
-        enable_input_range_ = true;
       }
     }
   }

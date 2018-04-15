@@ -327,20 +327,20 @@ Status TableCache::Get(const ReadOptions& options,
   const FileDescriptor& fd = meta.fd;
   Slice k = raw_k;
   while (meta.partial_removed) {
-    auto find = std::upper_bound(meta.range_set.begin(), meta.range_set.end(),
-        k, [&](const Slice& l, const InternalKey& r) {
-               return internal_comparator.Compare(l, r.Encode()) < 0;
-           });
+    auto find = std::upper_bound(
+                    meta.range_set.begin(), meta.range_set.end(), k,
+                    [&](const Slice& l, const InternalKey& r) {
+                        return internal_comparator.Compare(l, r.Encode()) < 0;
+                    });
     if ((find - meta.range_set.begin()) % 2 == 0) {
       if (find != meta.range_set.end()) {
-        if (internal_comparator.user_comparator()->Compare(
-                ExtractUserKey(k), ExtractUserKey(find->Encode())) == 0) {
+        // assert( Comp(k , find->internal_key() <= 0)
+        if (ExtractUserKey(k) == find->user_key()) {
           k = find->Encode();
           break;
         }
       }
-      if (find == meta.range_set.begin() ||
-          internal_comparator.Compare(find[-1].Encode(), k) != 0) {
+      if (find == meta.range_set.begin() || find[-1].Encode() != k) {
         return Status::OK();
       }
     }
