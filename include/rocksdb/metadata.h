@@ -54,7 +54,16 @@ struct LevelMetaData {
 
 // The metadata that describes a SST file.
 struct SstFileMetaData {
-  SstFileMetaData() {}
+  SstFileMetaData()
+      : size(0),
+        name(""),
+        db_path(""),
+        smallest_seqno(0),
+        largest_seqno(0),
+        smallestkey(""),
+        largestkey(""),
+        num_reads_sampled(0),
+        being_compacted(false) {}
   SstFileMetaData(const std::string& _file_name, const std::string& _path,
                   uint64_t _size, SequenceNumber _smallest_seqno,
                   SequenceNumber _largest_seqno,

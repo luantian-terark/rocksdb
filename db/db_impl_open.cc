@@ -361,6 +361,29 @@ Status DBImpl::Recover(
       assert(s.IsIOError());
       return s;
     }
+    // Verify compatibility of env_options_ and filesystem
+    {
+      unique_ptr<RandomAccessFile> idfile;
+      EnvOptions customized_env(env_options_);
+      customized_env.use_direct_reads |=
+          immutable_db_options_.use_direct_io_for_flush_and_compaction;
+      s = env_->NewRandomAccessFile(IdentityFileName(dbname_), &idfile,
+                                    customized_env);
+      if (!s.ok()) {
+        const char* error_msg = s.ToString().c_str();
+        // Check if unsupported Direct I/O is the root cause
+        customized_env.use_direct_reads = false;
+        s = env_->NewRandomAccessFile(IdentityFileName(dbname_), &idfile,
+                                      customized_env);
+        if (s.ok()) {
+          return Status::InvalidArgument(
+              "Direct I/O is not supported by the specified DB.");
+        } else {
+          return Status::InvalidArgument(
+              "Found options incompatible with filesystem", error_msg);
+        }
+      }
+    }
   }
 
   Status s = versions_->Recover(column_families, read_only);
@@ -596,12 +619,7 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
         // consecutive, we continue recovery despite corruption. This could
         // happen when we open and write to a corrupted DB, where sequence id
         // will start from the last sequence id we recovered.
-        if (sequence == *next_sequence ||
-            // With seq_per_batch_, if previous run was with two_write_queues_
-            // then allocate_seq_only_for_data_ was disabled and a gap in the
-            // sequence numbers in the log is expected by the commits without
-            // prepares.
-            (seq_per_batch_ && sequence >= *next_sequence)) {
+        if (sequence == *next_sequence) {
           stop_replay_for_corruption = false;
         }
         if (stop_replay_for_corruption) {
@@ -733,6 +751,12 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
     }
 
     if (!status.ok()) {
+      if (status.IsNotSupported()) {
+        // We should not treat NotSupported as corruption. It is rather a clear
+        // sign that we are processing a WAL that is produced by an incompatible
+        // version of the code.
+        return status;
+      }
       if (immutable_db_options_.wal_recovery_mode ==
           WALRecoveryMode::kSkipAnyCorruptedRecords) {
         // We should ignore all errors unconditionally
@@ -761,6 +785,7 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
     if ((*next_sequence != kMaxSequenceNumber) &&
         (versions_->LastSequence() <= last_sequence)) {
       versions_->SetLastAllocatedSequence(last_sequence);
+      versions_->SetLastPublishedSequence(last_sequence);
       versions_->SetLastSequence(last_sequence);
     }
   }
@@ -899,6 +924,7 @@ Status DBImpl::WriteLevel0TableForRecovery(int job_id, ColumnFamilyData* cfd,
     const uint64_t current_time = static_cast<uint64_t>(_current_time);
 
     {
+      auto write_hint = cfd->CalculateSSTWriteHint(0);
       mutex_.Unlock();
 
       SequenceNumber earliest_write_conflict_snapshot;
@@ -919,7 +945,7 @@ Status DBImpl::WriteLevel0TableForRecovery(int job_id, ColumnFamilyData* cfd,
           cfd->ioptions()->compression_opts, paranoid_file_checks,
           cfd->internal_stats(), TableFileCreationReason::kRecovery,
           &event_logger_, job_id, Env::IO_HIGH, nullptr /* table_properties */,
-          -1 /* level */, current_time);
+          -1 /* level */, current_time, write_hint);
       LogFlush(immutable_db_options_.info_log);
       ROCKS_LOG_DEBUG(immutable_db_options_.info_log,
                       "[%s] [WriteLevel0TableForRecovery]"
@@ -1042,6 +1068,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     return s;
   }
   impl->mutex_.Lock();
+  auto write_hint = impl->CalculateWALWriteHint();
   // Handles create_if_missing, error_if_exists
   s = impl->Recover(column_families);
   if (s.ok()) {
@@ -1057,6 +1084,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
         LogFileName(impl->immutable_db_options_.wal_dir, new_log_number),
         &lfile, opt_env_options);
     if (s.ok()) {
+      lfile->SetWriteLifeTimeHint(write_hint);
       lfile->SetPreallocationBlockSize(
           impl->GetWalPreallocateBlockSize(max_write_buffer_size));
       {

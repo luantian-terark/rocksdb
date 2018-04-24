@@ -192,8 +192,8 @@ WinMmapReadableFile::WinMmapReadableFile(const std::string& fileName,
       length_(length) {}
 
 WinMmapReadableFile::~WinMmapReadableFile() {
-  BOOL ret = ::UnmapViewOfFile(mapped_region_);
-  (void)ret;
+  BOOL ret __attribute__((__unused__));
+  ret = ::UnmapViewOfFile(mapped_region_);
   assert(ret);
 
   ret = ::CloseHandle(hMap_);
@@ -279,7 +279,7 @@ Status WinMmapFile::MapNewRegion() {
 
     if (hMap_ != NULL) {
       // Unmap the previous one
-      BOOL ret;
+      BOOL ret __attribute__((__unused__));
       ret = ::CloseHandle(hMap_);
       assert(ret);
       hMap_ = NULL;
@@ -880,7 +880,7 @@ inline
 Status WinWritableImpl::SyncImpl() {
   Status s;
   // Calls flush buffers
-  if (fsync(file_data_->GetFileHandle()) < 0) {
+  if (!file_data_->use_direct_io() && fsync(file_data_->GetFileHandle()) < 0) {
     auto lastError = GetLastError();
     s = IOErrorFromWindowsError(
         "fsync failed at Sync() for: " + file_data_->GetName(), lastError);
@@ -963,6 +963,8 @@ Status WinWritableFile::Sync() {
 
 Status WinWritableFile::Fsync() { return SyncImpl(); }
 
+bool WinWritableFile::IsSyncThreadSafe() const { return true; }
+
 uint64_t WinWritableFile::GetFileSize() {
   return GetFileNextWriteOffset();
 }
@@ -1021,7 +1023,7 @@ Status WinDirectory::Fsync() { return Status::OK(); }
 /// WinFileLock
 
 WinFileLock::~WinFileLock() {
-  BOOL ret;
+  BOOL ret __attribute__((__unused__));
   ret = ::CloseHandle(hFile_);
   assert(ret);
 }

@@ -111,7 +111,8 @@ CompressionType GetCompressionFlush(
   // optimization is used for leveled compaction. Otherwise the CPU and
   // latency overhead is not offset by saving much space.
   if (ioptions.compaction_style == kCompactionStyleUniversal) {
-    if (ioptions.compaction_options_universal.compression_size_percent < 0) {
+    if (mutable_cf_options.compaction_options_universal
+            .compression_size_percent < 0) {
       return mutable_cf_options.compression;
     } else {
       return kNoCompression;
@@ -127,13 +128,13 @@ CompressionType GetCompressionFlush(
 namespace {
 void DumpSupportInfo(Logger* logger) {
   ROCKS_LOG_HEADER(logger, "Compression algorithms supported:");
-  ROCKS_LOG_HEADER(logger, "\tSnappy supported: %d", Snappy_Supported());
-  ROCKS_LOG_HEADER(logger, "\tZlib supported: %d", Zlib_Supported());
-  ROCKS_LOG_HEADER(logger, "\tBzip supported: %d", BZip2_Supported());
-  ROCKS_LOG_HEADER(logger, "\tLZ4 supported: %d", LZ4_Supported());
-  ROCKS_LOG_HEADER(logger, "\tZSTDNotFinal supported: %d",
-                   ZSTDNotFinal_Supported());
-  ROCKS_LOG_HEADER(logger, "\tZSTD supported: %d", ZSTD_Supported());
+  for (auto& compression : OptionsHelper::compression_type_string_map) {
+    if (compression.second != kNoCompression &&
+        compression.second != kDisableCompressionOption) {
+      ROCKS_LOG_HEADER(logger, "\t%s supported: %d", compression.first.c_str(),
+                       CompressionTypeSupported(compression.second));
+    }
+  }
   ROCKS_LOG_HEADER(logger, "Fast CRC32 supported: %s",
                    crc32c::IsFastCrc32Supported().c_str());
 }
@@ -145,6 +146,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
                const bool seq_per_batch)
     : env_(options.env),
       dbname_(dbname),
+      own_info_log_(options.info_log == nullptr),
       initial_db_options_(SanitizeOptions(dbname, options)),
       immutable_db_options_(initial_db_options_),
       mutable_db_options_(initial_db_options_),
@@ -183,6 +185,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       num_running_flushes_(0),
       bg_purge_scheduled_(0),
       disable_delete_obsolete_files_(0),
+      pending_purge_obsolete_files_(0),
       delete_obsolete_files_last_run_(env_->NowMicros()),
       last_stats_dump_time_microsec_(0),
       next_job_id_(1),
@@ -203,21 +206,23 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       two_write_queues_(options.two_write_queues),
       manual_wal_flush_(options.manual_wal_flush),
       seq_per_batch_(seq_per_batch),
-      // When two_write_queues_ and seq_per_batch_ are both enabled we
-      // sometimes allocate a seq also to indicate the commit timestmamp of a
-      // transaction. In such cases last_sequence_ would not indicate the last
-      // visible sequence number in memtable and should not be used for
-      // snapshots. It should use last_allocated_sequence_ instaed but also
-      // needs other mechanisms to exclude the data that after last_sequence_
-      // and before last_allocated_sequence_ from the snapshot. In
-      // WritePreparedTxn this property is ensured since such data are not
-      // committed yet.
-      allocate_seq_only_for_data_(!(seq_per_batch && options.two_write_queues)),
+      // last_sequencee_ is always maintained by the main queue that also writes
+      // to the memtable. When two_write_queues_ is disabled last seq in
+      // memtable is the same as last seq published to the readers. When it is
+      // enabled but seq_per_batch_ is disabled, last seq in memtable still
+      // indicates last published seq since wal-only writes that go to the 2nd
+      // queue do not consume a sequence number. Otherwise writes performed by
+      // the 2nd queue could change what is visible to the readers. In this
+      // cases, last_seq_same_as_publish_seq_==false, the 2nd queue maintains a
+      // separate variable to indicate the last published sequence.
+      last_seq_same_as_publish_seq_(
+          !(seq_per_batch && options.two_write_queues)),
       // Since seq_per_batch_ is currently set only by WritePreparedTxn which
       // requires a custom gc for compaction, we use that to set use_custom_gc_
       // as well.
       use_custom_gc_(seq_per_batch),
-      preserve_deletes_(options.preserve_deletes) {
+      preserve_deletes_(options.preserve_deletes),
+      closed_(false) {
   env_->GetAbsolutePath(dbname, &db_absolute_path_);
 
   // Reserve ten files or so for other uses and give the rest to TableCache.
@@ -260,7 +265,7 @@ void DBImpl::CancelAllBackgroundWork(bool wait) {
       if (!cfd->IsDropped() && cfd->initialized() && !cfd->mem()->IsEmpty()) {
         cfd->Ref();
         mutex_.Unlock();
-        FlushMemTable(cfd, FlushOptions());
+        FlushMemTable(cfd, FlushOptions(), FlushReason::kShutDown);
         mutex_.Lock();
         cfd->Unref();
       }
@@ -280,7 +285,7 @@ void DBImpl::CancelAllBackgroundWork(bool wait) {
   }
 }
 
-DBImpl::~DBImpl() {
+Status DBImpl::CloseHelper() {
   // CancelAllBackgroundWork called with false means we just set the shutdown
   // marker. After this we do a variant of the waiting and unschedule work
   // (to consider: moving all the waiting into CancelAllBackgroundWork(true))
@@ -289,6 +294,7 @@ DBImpl::~DBImpl() {
       env_->UnSchedule(this, Env::Priority::BOTTOM);
   int compactions_unscheduled = env_->UnSchedule(this, Env::Priority::LOW);
   int flushes_unscheduled = env_->UnSchedule(this, Env::Priority::HIGH);
+  Status ret;
   mutex_.Lock();
   bg_bottom_compaction_scheduled_ -= bottom_compactions_unscheduled;
   bg_compaction_scheduled_ -= compactions_unscheduled;
@@ -296,7 +302,8 @@ DBImpl::~DBImpl() {
 
   // Wait for background work to finish
   while (bg_bottom_compaction_scheduled_ || bg_compaction_scheduled_ ||
-         bg_flush_scheduled_ || bg_purge_scheduled_) {
+         bg_flush_scheduled_ || bg_purge_scheduled_ ||
+         pending_purge_obsolete_files_) {
     TEST_SYNC_POINT("DBImpl::~DBImpl:WaitJob");
     bg_cv_.Wait();
   }
@@ -350,7 +357,18 @@ DBImpl::~DBImpl() {
     delete l;
   }
   for (auto& log : logs_) {
-    log.ClearWriter();
+    uint64_t log_number = log.writer->get_log_number();
+    Status s = log.ClearWriter();
+    if (!s.ok()) {
+      ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                     "Unable to Sync WAL file %s with error -- %s",
+                     LogFileName(immutable_db_options_.wal_dir, log_number).c_str(),
+                     s.ToString().c_str());
+      // Retain the first error
+      if (ret.ok()) {
+        ret = s;
+      }
+    }
   }
   logs_.clear();
 
@@ -383,6 +401,25 @@ DBImpl::~DBImpl() {
 
   ROCKS_LOG_INFO(immutable_db_options_.info_log, "Shutdown complete");
   LogFlush(immutable_db_options_.info_log);
+
+  if (immutable_db_options_.info_log && own_info_log_) {
+    Status s = immutable_db_options_.info_log->Close();
+    if (ret.ok()) {
+      ret = s;
+    }
+  }
+  return ret;
+}
+
+Status DBImpl::CloseImpl() {
+  return CloseHelper();
+}
+
+DBImpl::~DBImpl() {
+  if (!closed_) {
+    closed_ = true;
+    CloseHelper();
+  }
 }
 
 void DBImpl::MaybeIgnoreError(Status* s) const {
@@ -528,6 +565,7 @@ Status DBImpl::SetOptions(ColumnFamilyHandle* column_family,
 
       persist_options_status = WriteOptionsFile(
           false /*need_mutex_lock*/, true /*need_enter_write_thread*/);
+      bg_cv_.SignalAll();
     }
   }
   sv_context.Clean();
@@ -594,13 +632,15 @@ Status DBImpl::SetDBOptions(
         new_options.bytes_per_sync = 1024 * 1024;
       }
       mutable_db_options_ = new_options;
-      env_options_for_compaction_ = EnvOptions(BuildDBOptions(
-                                                immutable_db_options_,
-                                                mutable_db_options_));
+      env_options_for_compaction_ = EnvOptions(
+          BuildDBOptions(immutable_db_options_, mutable_db_options_));
       env_options_for_compaction_ = env_->OptimizeForCompactionTableWrite(
-                                            env_options_for_compaction_,
-                                            immutable_db_options_);
+          env_options_for_compaction_, immutable_db_options_);
       versions_->ChangeEnvOptions(mutable_db_options_);
+      env_options_for_compaction_ = env_->OptimizeForCompactionTableRead(
+          env_options_for_compaction_, immutable_db_options_);
+      env_options_for_compaction_.compaction_readahead_size =
+          mutable_db_options_.compaction_readahead_size;
       write_thread_.EnterUnbatched(&w, &mutex_);
       if (total_log_size_ > GetMaxTotalWalSize() || wal_changed) {
         Status purge_wal_status = SwitchWAL(&write_context);
@@ -770,8 +810,8 @@ SequenceNumber DBImpl::GetLatestSequenceNumber() const {
   return versions_->LastSequence();
 }
 
-SequenceNumber DBImpl::IncAndFetchSequenceNumber() {
-  return versions_->FetchAddLastAllocatedSequence(1ull) + 1ull;
+void DBImpl::SetLastPublishedSequence(SequenceNumber seq) {
+  versions_->SetLastPublishedSequence(seq);
 }
 
 bool DBImpl::SetPreserveDeletesSequenceNumber(SequenceNumber seqnum) {
@@ -997,8 +1037,9 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
     // super versipon because a flush happening in between may compact
     // away data for the snapshot, but the snapshot is earlier than the
     // data overwriting it, so users may see wrong results.
-    snapshot = allocate_seq_only_for_data_ ? versions_->LastSequence()
-                                           : versions_->LastAllocatedSequence();
+    snapshot = last_seq_same_as_publish_seq_
+                   ? versions_->LastSequence()
+                   : versions_->LastPublishedSequence();
   }
   TEST_SYNC_POINT("DBImpl::GetImpl:3");
   TEST_SYNC_POINT("DBImpl::GetImpl:4");
@@ -1089,8 +1130,9 @@ std::vector<Status> DBImpl::MultiGet(
     snapshot = reinterpret_cast<const SnapshotImpl*>(
         read_options.snapshot)->number_;
   } else {
-    snapshot = allocate_seq_only_for_data_ ? versions_->LastSequence()
-                                           : versions_->LastAllocatedSequence();
+    snapshot = last_seq_same_as_publish_seq_
+                   ? versions_->LastSequence()
+                   : versions_->LastPublishedSequence();
   }
   for (auto mgd_iter : multiget_cf_data) {
     mgd_iter.second->super_version =
@@ -1428,6 +1470,7 @@ Status DBImpl::DropColumnFamilyImpl(ColumnFamilyHandle* column_family) {
       }
       is_snapshot_supported_ = new_is_snapshot_supported;
     }
+    bg_cv_.SignalAll();
   }
 
   if (s.ok()) {
@@ -1517,7 +1560,7 @@ Iterator* DBImpl::NewIterator(const ReadOptions& read_options,
 #endif
   } else {
     // Note: no need to consider the special case of
-    // allocate_seq_only_for_data_==false since NewIterator is overridden in
+    // last_seq_same_as_publish_seq_==false since NewIterator is overridden in
     // WritePreparedTxnDB
     auto snapshot = read_options.snapshot != nullptr
                         ? read_options.snapshot->GetSequenceNumber()
@@ -1531,7 +1574,8 @@ ArenaWrappedDBIter* DBImpl::NewIteratorImpl(const ReadOptions& read_options,
                                             ColumnFamilyData* cfd,
                                             SequenceNumber snapshot,
                                             ReadCallback* read_callback,
-                                            bool allow_blob) {
+                                            bool allow_blob,
+                                            bool allow_refresh) {
   SuperVersion* sv = cfd->GetReferencedSuperVersion(&mutex_);
 
   // Try to generate a DB iterator tree in continuous memory area to be
@@ -1580,7 +1624,8 @@ ArenaWrappedDBIter* DBImpl::NewIteratorImpl(const ReadOptions& read_options,
       env_, read_options, *cfd->ioptions(), snapshot,
       sv->mutable_cf_options.max_sequential_skip_in_iterations,
       sv->version_number, read_callback,
-      ((read_options.snapshot != nullptr) ? nullptr : this), cfd, allow_blob);
+      ((read_options.snapshot != nullptr) ? nullptr : this), cfd, allow_blob,
+      allow_refresh);
 
   InternalIterator* internal_iter =
       NewInternalIterator(read_options, cfd, sv, db_iter->GetArena(),
@@ -1635,7 +1680,7 @@ Status DBImpl::NewIterators(
 #endif
   } else {
     // Note: no need to consider the special case of
-    // allocate_seq_only_for_data_==false since NewIterators is overridden in
+    // last_seq_same_as_publish_seq_==false since NewIterators is overridden in
     // WritePreparedTxnDB
     auto snapshot = read_options.snapshot != nullptr
                         ? read_options.snapshot->GetSequenceNumber()
@@ -1670,9 +1715,9 @@ const Snapshot* DBImpl::GetSnapshotImpl(bool is_write_conflict_boundary) {
     delete s;
     return nullptr;
   }
-  auto snapshot_seq = allocate_seq_only_for_data_
+  auto snapshot_seq = last_seq_same_as_publish_seq_
                           ? versions_->LastSequence()
-                          : versions_->LastAllocatedSequence();
+                          : versions_->LastPublishedSequence();
   return snapshots_.New(s, snapshot_seq, unix_time, is_write_conflict_boundary);
 }
 
@@ -1683,9 +1728,9 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
     snapshots_.Delete(casted_s);
     uint64_t oldest_snapshot;
     if (snapshots_.empty()) {
-      oldest_snapshot = allocate_seq_only_for_data_
+      oldest_snapshot = last_seq_same_as_publish_seq_
                             ? versions_->LastSequence()
-                            : versions_->LastAllocatedSequence();
+                            : versions_->LastPublishedSequence();
     } else {
       oldest_snapshot = snapshots_.oldest()->number_;
     }
@@ -1701,12 +1746,6 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
     }
   }
   delete casted_s;
-}
-
-bool DBImpl::HasActiveSnapshotInRange(SequenceNumber lower_bound,
-                                      SequenceNumber upper_bound) {
-  InstrumentedMutexLock l(&mutex_);
-  return snapshots_.HasSnapshotInRange(lower_bound, upper_bound);
 }
 
 #ifndef ROCKSDB_LITE
@@ -2072,7 +2111,7 @@ Status DBImpl::DeleteFile(std::string name) {
                       name.c_str());
       return Status::NotSupported("Delete only supported for archived logs");
     }
-    status = env_->DeleteFile(immutable_db_options_.wal_dir + "/" + name);
+    status = wal_manager_.DeleteFile(name, number);
     if (!status.ok()) {
       ROCKS_LOG_ERROR(immutable_db_options_.info_log,
                       "DeleteFile %s failed -- %s.\n", name.c_str(),
@@ -2157,82 +2196,191 @@ Status DBImpl::DeleteFile(std::string name) {
 
 Status DBImpl::DeleteFilesInRange(ColumnFamilyHandle* column_family,
                                   const Slice* begin, const Slice* end) {
+  RangePtr rp;
+  rp.start = begin;
+  rp.limit = end;
+  return DeleteFilesInRanges(column_family, &rp, 1, true);
+}
+
+Status DBImpl::DeleteFilesInRanges(ColumnFamilyHandle* column_family,
+                                   const RangePtr* ranges, size_t n,
+                                   bool include_end) {
   Status status;
   auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family);
   ColumnFamilyData* cfd = cfh->cfd();
   VersionEdit edit;
-  std::vector<FileMetaData*> deleted_files;
+  std::set<FileMetaData*> deleted_files;
   JobContext job_context(next_job_id_.fetch_add(1), true);
   {
     InstrumentedMutexLock l(&mutex_);
     Version* input_version = cfd->current();
-    edit.SetColumnFamily(cfd->GetID());
 
     auto* vstorage = input_version->storage_info();
     bool is_delete = false;
-    for (int i = 0; i < cfd->NumberLevels(); i++) {
-      std::vector<FileMetaData*> level_files;
-      InternalKey begin_storage, end_storage, *begin_key, *end_key;
-      if (begin == nullptr) {
-        begin_key = nullptr;
-      } else {
-        begin_storage.SetMinPossibleForUserKey(*begin);
-        begin_key = &begin_storage;
-      }
-      if (end == nullptr) {
-        end_key = nullptr;
-      } else {
-        end_storage.SetMaxPossibleForUserKey(*end);
-        end_key = &end_storage;
-      }
+    if (cfd->ioptions()->enable_partial_remove) {
+      const InternalKeyComparator& ic = cfd->ioptions()->internal_comparator;
+      const Comparator* uc = cfd->ioptions()->user_comparator;
 
-      if (cfd->ioptions()->enable_partial_remove) {
-        vstorage->GetOverlappingInputs(i, begin_key, end_key,
-                                       &level_files, -1 /* hint_index */,
-                                       nullptr /* file_index */);
-        if (!level_files.empty()) {
-          std::vector<InternalKey> erase_set;
-          erase_set.emplace_back(begin_key == nullptr ?
-                                 level_files.front()->smallest() : *begin_key);
-          erase_set.emplace_back(end_key == nullptr ?
-                                 level_files.back()->largest() : *end_key);
+      // deref nullptr of start/limit
+      InternalKey* nullptr_start = nullptr;
+      InternalKey* nullptr_limit = nullptr;
+      for (int level = 0; level < cfd->NumberLevels(); level++) {
+        auto& level_files = vstorage->LevelFiles(level);
+        if (level == 0) {
+          for (size_t i = 0; i < level_files.size(); ++i) {
+            auto& f = level_files[i];
+            if (nullptr_start == nullptr ||
+              ic.Compare(f->smallest(), *nullptr_start) < 0) {
+              nullptr_start = &f->smallest();
+            }
+            if (nullptr_limit == nullptr ||
+              ic.Compare(f->largest(), *nullptr_limit) > 0) {
+              nullptr_limit = &f->largest();
+            }
+          }
+        }
+        else {
+          auto& f0 = level_files.front();
+          auto& fn = level_files.back();
+          if (nullptr_start == nullptr ||
+            ic.Compare(f0->smallest(), *nullptr_start) < 0) {
+            nullptr_start = &f0->smallest();
+          }
+          if (nullptr_limit == nullptr ||
+            ic.Compare(fn->largest(), *nullptr_limit) > 0) {
+            nullptr_limit = &fn->largest();
+          }
+        }
+      }
+      if (nullptr_start == nullptr || nullptr_limit == nullptr) {
+        // empty vstorage ...
+        job_context.Clean();
+        return Status::OK();
+      }
+      // sort ranges
+      bool is_limit_nullptr = false;
+      std::vector<Range> ranges_copy;
+      ranges_copy.resize(n);
+      for (size_t i = 0; i < n; ++i) {
+        ranges_copy[i].start =
+            ranges[i].start == nullptr ? nullptr_start->user_key() : *ranges[i].start;
+        if (ranges[i].limit == nullptr) {
+          is_limit_nullptr = true;
+          ranges_copy[i].limit = nullptr_limit->user_key();
+        } else {
+          ranges_copy[i].limit = *ranges[i].limit;
+        }
+      }
+      std::sort(ranges_copy.begin(), ranges_copy.end(),
+                [uc](const Range& l, const Range& r) {
+                    return uc->Compare(l.start, r.start) < 0;
+                });
+      // union ranges
+      size_t c = 0;
+      for (size_t i = 1; i < n; ++i) {
+        if (uc->Compare(ranges_copy[c].limit,
+                        ranges_copy[i].start) >= 0) {
+          if (uc->Compare(ranges_copy[c].limit, ranges_copy[i].limit) < 0) {
+            ranges_copy[c].limit = ranges_copy[i].limit;
+          }
+        } else {
+          ++c;
+        }
+      }
+      ranges_copy.resize(c + 1);
+      RangeEraseSet erase_set;
+      for (size_t i = 0; i < ranges_copy.size(); ++i) {
+        InternalKey smallest, largest;
+        if (ranges_copy[i].start != nullptr) {
+          smallest.SetMinPossibleForUserKey(ranges_copy[i].start);
+        }
+        if (ranges_copy[i].limit != nullptr) {
+          largest.SetMaxPossibleForUserKey(ranges_copy[i].limit);
+        }
+        erase_set.push(smallest, largest, false, !include_end);
+      }
+      // limit is nullptr , force include end (set open interval)
+      if (is_limit_nullptr) {
+        assert(erase_set.erase.back().user_key() == nullptr_limit->user_key());
+        erase_set.open.back() = false;
+      }
+      InternalKey *begin_key, *end_key;
+      begin_key = &erase_set.erase.front();
+      end_key = &erase_set.erase.back();
+      for (int i = 0; i < cfd->NumberLevels(); i++) {
+        std::vector<FileMetaData*> level_files;
+
+        if (cfd->ioptions()->enable_partial_remove) {
+          vstorage->GetOverlappingInputs(i, begin_key, end_key,
+                                         &level_files, -1 /* hint_index */,
+                                         nullptr /* file_index */);
+          if (!level_files.empty()) {
+            FileMetaData* level_file;
+            for (uint32_t j = 0; j < level_files.size(); j++) {
+              level_file = level_files[j];
+              if (level_file->being_compacted) {
+                continue;
+              }
+              PartialRemovedMetaData meta;
+              if (!meta.InitFrom(level_file, erase_set, 0, cfd, env_options_)) {
+                continue;
+              }
+              is_delete = true;
+              edit.DeleteFile(i, level_file->fd.GetNumber());
+              deleted_files.insert(level_file);
+              level_file->being_compacted = true;
+              if (!meta.range_set.empty()) {
+                edit.AddFile(i, meta.Get());
+              }
+            }
+          }
+        }
+      }
+    } else {
+      for (size_t r = 0; r < n; r++) {
+        auto begin = ranges[r].start, end = ranges[r].limit;
+        for (int i = 1; i < cfd->NumberLevels(); i++) {
+          if (vstorage->LevelFiles(i).empty() ||
+              !vstorage->OverlapInLevel(i, begin, end)) {
+            continue;
+          }
+          std::vector<FileMetaData*> level_files;
+          InternalKey begin_storage, end_storage, *begin_key, *end_key;
+          if (begin == nullptr) {
+            begin_key = nullptr;
+          } else {
+            begin_storage.SetMinPossibleForUserKey(*begin);
+            begin_key = &begin_storage;
+          }
+          if (end == nullptr) {
+            end_key = nullptr;
+          } else {
+            end_storage.SetMaxPossibleForUserKey(*end);
+            end_key = &end_storage;
+          }
+
+          vstorage->GetCleanInputsWithinInterval(i, begin_key, end_key,
+                                                 &level_files, -1 /* hint_index */,
+                                                 nullptr /* file_index */);
           FileMetaData* level_file;
           for (uint32_t j = 0; j < level_files.size(); j++) {
             level_file = level_files[j];
             if (level_file->being_compacted) {
               continue;
             }
-            PartialRemovedMetaData meta;
-            if (!meta.InitFrom(level_file, erase_set, 0, cfd, env_options_)) {
+            if (deleted_files.find(level_file) != deleted_files.end()) {
+              continue;
+            }
+            if (!include_end && end != nullptr &&
+                cfd->user_comparator()->Compare(level_file->largest().user_key(), *end) == 0) {
               continue;
             }
             is_delete = true;
+            edit.SetColumnFamily(cfd->GetID());
             edit.DeleteFile(i, level_file->fd.GetNumber());
-            deleted_files.push_back(level_file);
+            deleted_files.insert(level_file);
             level_file->being_compacted = true;
-            if (!meta.range_set.empty()) {
-              edit.AddFile(i, meta.Get());
-            }
           }
-        }
-      } else {
-        if (i == 0 || vstorage->LevelFiles(i).empty() ||
-            !vstorage->OverlapInLevel(i, begin, end)) {
-          continue;
-        }
-        vstorage->GetCleanInputsWithinInterval(i, begin_key, end_key,
-                                               &level_files, -1 /* hint_index */,
-                                               nullptr /* file_index */);
-        FileMetaData* level_file;
-        for (uint32_t j = 0; j < level_files.size(); j++) {
-          level_file = level_files[j];
-          if (level_file->being_compacted) {
-            continue;
-          }
-          is_delete = true;
-          edit.DeleteFile(i, level_file->fd.GetNumber());
-          deleted_files.push_back(level_file);
-          level_file->being_compacted = true;
         }
       }
     }
@@ -2382,7 +2530,15 @@ Status DB::DestroyColumnFamilyHandle(ColumnFamilyHandle* column_family) {
   return Status::OK();
 }
 
-DB::~DB() { }
+DB::~DB() {}
+
+Status DBImpl::Close() {
+  if (!closed_) {
+    closed_ = true;
+    return CloseImpl();
+  }
+  return Status::OK();
+}
 
 Status DB::ListColumnFamilies(const DBOptions& db_options,
                               const std::string& name,
@@ -2838,14 +2994,14 @@ Status DBImpl::IngestExternalFile(
     // Figure out if we need to flush the memtable first
     if (status.ok()) {
       bool need_flush = false;
-      status = ingestion_job.NeedsFlush(&need_flush);
+      status = ingestion_job.NeedsFlush(&need_flush, cfd->GetSuperVersion());
       TEST_SYNC_POINT_CALLBACK("DBImpl::IngestExternalFile:NeedFlush",
-                                &need_flush);
+                               &need_flush);
       if (status.ok() && need_flush) {
         mutex_.Unlock();
         status = FlushMemTable(cfd, FlushOptions(),
-                               true /* writes_stopped */,
-                               true /* nonmem_writes_stopped */);
+                               FlushReason::kExternalFileIngestion,
+                               true /* writes_stopped */);
         mutex_.Lock();
       }
     }

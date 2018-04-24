@@ -86,6 +86,18 @@ enum class CompactionReason {
   kUniversalTrivialMove,
 };
 
+enum class FlushReason : int {
+  kUnknown = 0x00,
+  kGetLiveFiles = 0x01,
+  kShutDown = 0x02,
+  kExternalFileIngestion = 0x03,
+  kManualCompaction = 0x04,
+  kWriteBufferManager = 0x05,
+  kWriteBufferFull = 0x06,
+  kTest = 0x07,
+  kSuperVersionChange = 0x08,
+};
+
 enum class BackgroundErrorReason {
   kFlush,
   kCompaction,
@@ -147,6 +159,8 @@ struct FlushJobInfo {
   SequenceNumber largest_seqno;
   // Table properties of the table being flushed
   TableProperties table_properties;
+
+  FlushReason flush_reason;
 };
 
 struct CompactionJobInfo {
@@ -225,7 +239,7 @@ struct ExternalFileIngestionInfo {
 };
 
 // A call-back function to RocksDB which will be called when the compaction
-// iterator is compacting values. It is mean to be returned from
+// iterator is compacting values. It is meant to be returned from
 // EventListner::GetCompactionEventListner() at the beginning of compaction
 // job.
 class CompactionEventListener {

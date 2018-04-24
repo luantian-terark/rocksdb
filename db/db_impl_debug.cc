@@ -103,7 +103,7 @@ Status DBImpl::TEST_FlushMemTable(bool wait, ColumnFamilyHandle* cfh) {
     auto cfhi = reinterpret_cast<ColumnFamilyHandleImpl*>(cfh);
     cfd = cfhi->cfd();
   }
-  return FlushMemTable(cfd, fo);
+  return FlushMemTable(cfd, fo, FlushReason::kTest);
 }
 
 Status DBImpl::TEST_WaitForFlushMemTable(ColumnFamilyHandle* column_family) {
@@ -210,7 +210,7 @@ int DBImpl::TEST_BGFlushesAllowed() const {
 }
 
 SequenceNumber DBImpl::TEST_GetLastVisibleSequence() const {
-  if (allocate_seq_only_for_data_) {
+  if (last_seq_same_as_publish_seq_) {
     return versions_->LastSequence();
   } else {
     return versions_->LastAllocatedSequence();

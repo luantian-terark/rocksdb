@@ -267,6 +267,10 @@ class WriteBatch : public WriteBatchBase {
     // iteration is halted. Otherwise, it continues iterating. The default
     // implementation always returns true.
     virtual bool Continue();
+
+   protected:
+    friend class WriteBatch;
+    virtual bool WriteAfterCommit() const { return true; }
   };
   Status Iterate(Handler* handler) const;
 
@@ -311,6 +315,7 @@ class WriteBatch : public WriteBatchBase {
 
   // Constructor with a serialized string object
   explicit WriteBatch(const std::string& rep);
+  explicit WriteBatch(std::string&& rep);
 
   WriteBatch(const WriteBatch& src);
   WriteBatch(WriteBatch&& src) noexcept;

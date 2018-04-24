@@ -44,6 +44,7 @@ INSTANTIATE_TEST_CASE_P(
     DBAsBaseDB, TransactionTest,
     ::testing::Values(std::make_tuple(false, false, WRITE_COMMITTED),
                       std::make_tuple(false, true, WRITE_COMMITTED),
+                      std::make_tuple(false, false, WRITE_PREPARED),
                       std::make_tuple(false, true, WRITE_PREPARED)));
 INSTANTIATE_TEST_CASE_P(
     StackableDBAsBaseDB, TransactionTest,
@@ -69,6 +70,26 @@ TEST_P(TransactionTest, DoubleEmptyWrite) {
 
   ASSERT_OK(db->Write(write_options, &batch));
   ASSERT_OK(db->Write(write_options, &batch));
+
+  // Also test committing empty transactions in 2PC
+  TransactionOptions txn_options;
+  Transaction* txn0 = db->BeginTransaction(write_options, txn_options);
+  ASSERT_OK(txn0->SetName("xid"));
+  ASSERT_OK(txn0->Prepare());
+  ASSERT_OK(txn0->Commit());
+  delete txn0;
+
+  // Also test that it works during recovery
+  txn0 = db->BeginTransaction(write_options, txn_options);
+  ASSERT_OK(txn0->SetName("xid2"));
+  txn0->Put(Slice("foo0"), Slice("bar0a"));
+  ASSERT_OK(txn0->Prepare());
+  delete txn0;
+  reinterpret_cast<PessimisticTransactionDB*>(db)->TEST_Crash();
+  ASSERT_OK(ReOpenNoDelete());
+  txn0 = db->GetTransactionByName("xid2");
+  ASSERT_OK(txn0->Commit());
+  delete txn0;
 }
 
 TEST_P(TransactionTest, SuccessTest) {
@@ -141,12 +162,11 @@ TEST_P(TransactionTest, ValidateSnapshotTest) {
     ASSERT_OK(s);
     delete txn1;
 
-    SequenceNumber dont_care;
     auto pes_txn2 = dynamic_cast<PessimisticTransaction*>(txn2);
     // Test the simple case where the key is not tracked yet
     auto trakced_seq = kMaxSequenceNumber;
     s = pes_txn2->ValidateSnapshot(db->DefaultColumnFamily(), "foo",
-                                   trakced_seq, &dont_care);
+                                   &trakced_seq);
     ASSERT_TRUE(s.IsBusy());
     delete txn2;
   }
@@ -833,7 +853,7 @@ TEST_P(TransactionTest, SimpleTwoPhaseTransactionTest) {
     s = txn->Commit();
     ASSERT_EQ(s, Status::InvalidArgument());
 
-    // no longer is prpared results
+    // no longer is prepared results
     db->GetAllPreparedTransactions(&prepared_trans);
     ASSERT_EQ(prepared_trans.size(), 0);
     ASSERT_EQ(db->GetTransactionByName("xid"), nullptr);
@@ -931,6 +951,8 @@ TEST_P(TransactionTest, TwoPhaseNameTest) {
   s = txn1->SetName("name4");
   ASSERT_EQ(s, Status::InvalidArgument());
 
+  txn1->Rollback();
+  txn2->Rollback();
   delete txn1;
   delete txn2;
 }
@@ -1154,6 +1176,7 @@ TEST_P(TransactionTest, PersistentTwoPhaseTransactionTest) {
   db->FlushWAL(false);
   delete txn;
   // kill and reopen
+  reinterpret_cast<PessimisticTransactionDB*>(db)->TEST_Crash();
   s = ReOpenNoDelete();
   ASSERT_OK(s);
   db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
@@ -1190,7 +1213,7 @@ TEST_P(TransactionTest, PersistentTwoPhaseTransactionTest) {
   s = txn->Commit();
   ASSERT_EQ(s, Status::InvalidArgument());
 
-  // no longer is prpared results
+  // no longer is prepared results
   prepared_trans.clear();
   db->GetAllPreparedTransactions(&prepared_trans);
   ASSERT_EQ(prepared_trans.size(), 0);
@@ -1342,6 +1365,7 @@ TEST_P(TransactionTest, TwoPhaseLongPrepareTest) {
     if (i % 29 == 0) {
       // crash
       env->SetFilesystemActive(false);
+      reinterpret_cast<PessimisticTransactionDB*>(db)->TEST_Crash();
       ReOpenNoDelete();
     } else if (i % 37 == 0) {
       // close
@@ -1444,6 +1468,7 @@ TEST_P(TransactionTest, TwoPhaseDoubleRecoveryTest) {
 
   // kill and reopen
   env->SetFilesystemActive(false);
+  reinterpret_cast<PessimisticTransactionDB*>(db)->TEST_Crash();
   ReOpenNoDelete();
 
   // commit old txn
@@ -1825,6 +1850,7 @@ TEST_P(TransactionTest, TwoPhaseOutOfOrderDelete) {
 
   // kill and reopen
   env->SetFilesystemActive(false);
+  reinterpret_cast<PessimisticTransactionDB*>(db)->TEST_Crash();
   ReOpenNoDelete();
 
   s = db->Get(read_options, "first", &value);
@@ -2874,12 +2900,8 @@ TEST_P(TransactionTest, UntrackedWrites) {
   // Untracked writes should succeed even though key was written after snapshot
   s = txn->PutUntracked("untracked", "1");
   ASSERT_OK(s);
-  if (txn_db_options.write_policy != WRITE_PREPARED) {
-    // WRITE_PREPARED does not currently support dup merge keys.
-    // TODO(myabandeh): remove this if-then when the support is added
-    s = txn->MergeUntracked("untracked", "2");
-    ASSERT_OK(s);
-  }
+  s = txn->MergeUntracked("untracked", "2");
+  ASSERT_OK(s);
   s = txn->DeleteUntracked("untracked");
   ASSERT_OK(s);
 
@@ -4250,11 +4272,6 @@ TEST_P(TransactionTest, SingleDeleteTest) {
 }
 
 TEST_P(TransactionTest, MergeTest) {
-  if (txn_db_options.write_policy == WRITE_PREPARED) {
-    // WRITE_PREPARED does not currently support dup merge keys.
-    // TODO(myabandeh): remove this if-then when the support is added
-    return;
-  }
   WriteOptions write_options;
   ReadOptions read_options;
   string value;
@@ -4773,34 +4790,55 @@ Status TransactionStressTestInserter(TransactionDB* db,
 }
 }  // namespace
 
+// Worker threads add a number to a key from each set of keys. The checker
+// threads verify that the sum of all keys in each set are equal.
 TEST_P(MySQLStyleTransactionTest, TransactionStressTest) {
-  const size_t num_threads = 4;
+  // Small write buffer to trigger more compactions
+  options.write_buffer_size = 1024;
+  ReOpenNoDelete();
+  const size_t num_workers = 4;   // worker threads count
+  const size_t num_checkers = 2;  // checker threads count
   const size_t num_transactions_per_thread = 10000;
-  const size_t num_sets = 3;
+  const uint16_t num_sets = 3;
   const size_t num_keys_per_set = 100;
   // Setting the key-space to be 100 keys should cause enough write-conflicts
   // to make this test interesting.
 
   std::vector<port::Thread> threads;
+  std::atomic<uint32_t> finished = {0};
+  bool TAKE_SNAPSHOT = true;
 
   std::function<void()> call_inserter = [&] {
     ASSERT_OK(TransactionStressTestInserter(db, num_transactions_per_thread,
                                             num_sets, num_keys_per_set));
+    finished++;
+  };
+  std::function<void()> call_checker = [&] {
+    size_t seed = std::hash<std::thread::id>()(std::this_thread::get_id());
+    Random64 rand(seed);
+    // Verify that data is consistent
+    while (finished < num_workers) {
+      Status s = RandomTransactionInserter::Verify(
+          db, num_sets, num_keys_per_set, TAKE_SNAPSHOT, &rand);
+      ASSERT_OK(s);
+    }
   };
 
-  // Create N threads that use RandomTransactionInserter to write
-  // many transactions.
-  for (uint32_t i = 0; i < num_threads; i++) {
+  for (uint32_t i = 0; i < num_workers; i++) {
     threads.emplace_back(call_inserter);
   }
+  for (uint32_t i = 0; i < num_checkers; i++) {
+    threads.emplace_back(call_checker);
+  }
 
-  // Wait for all threads to run
+  // Wait for all threads to finish
   for (auto& t : threads) {
     t.join();
   }
 
   // Verify that data is consistent
-  Status s = RandomTransactionInserter::Verify(db, num_sets);
+  Status s = RandomTransactionInserter::Verify(db, num_sets, num_keys_per_set,
+                                               !TAKE_SNAPSHOT);
   ASSERT_OK(s);
 }
 
@@ -4838,6 +4876,8 @@ TEST_P(TransactionTest, MemoryLimitTest) {
 // necessarily the one acceptable way. If the algorithm is legitimately changed,
 // this unit test should be updated as well.
 TEST_P(TransactionTest, SeqAdvanceTest) {
+  // TODO(myabandeh): must be test with false before new releases
+  const bool short_test = true;
   WriteOptions wopts;
   FlushOptions fopt;
 
@@ -4847,7 +4887,7 @@ TEST_P(TransactionTest, SeqAdvanceTest) {
   // Do the test with NUM_BRANCHES branches in it. Each run of a test takes some
   // of the branches. This is the same as counting a binary number where i-th
   // bit represents whether we take branch i in the represented by the number.
-  const size_t NUM_BRANCHES = 8;
+  const size_t NUM_BRANCHES = short_test ? 6 : 10;
   // Helper function that shows if the branch is to be taken in the run
   // represented by the number n.
   auto branch_do = [&](size_t n, size_t* branch) {
@@ -4870,7 +4910,7 @@ TEST_P(TransactionTest, SeqAdvanceTest) {
       seq = db_impl->TEST_GetLastVisibleSequence();
       ASSERT_EQ(exp_seq, seq);
     }
-    if (branch_do(n, &branch)) {
+    if (!short_test && branch_do(n, &branch)) {
       db_impl->FlushWAL(true);
       ReOpenNoDelete();
       db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
@@ -4892,7 +4932,7 @@ TEST_P(TransactionTest, SeqAdvanceTest) {
       seq = db_impl->TEST_GetLastVisibleSequence();
       ASSERT_EQ(exp_seq, seq);
     }
-    if (branch_do(n, &branch)) {
+    if (!short_test && branch_do(n, &branch)) {
       db_impl->FlushWAL(true);
       ReOpenNoDelete();
       db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
@@ -4909,7 +4949,7 @@ TEST_P(TransactionTest, SeqAdvanceTest) {
       seq = db_impl->TEST_GetLastVisibleSequence();
       ASSERT_EQ(exp_seq, seq);
     }
-    if (branch_do(n, &branch)) {
+    if (!short_test && branch_do(n, &branch)) {
       db_impl->FlushWAL(true);
       ReOpenNoDelete();
       db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
@@ -4917,9 +4957,23 @@ TEST_P(TransactionTest, SeqAdvanceTest) {
       ASSERT_EQ(exp_seq, seq);
     }
 
-    txn_t0(0);
+    txn_t4(0);
     seq = db_impl->TEST_GetLastVisibleSequence();
+
     ASSERT_EQ(exp_seq, seq);
+
+    if (branch_do(n, &branch)) {
+      db_impl->Flush(fopt);
+      seq = db_impl->TEST_GetLastVisibleSequence();
+      ASSERT_EQ(exp_seq, seq);
+    }
+    if (!short_test && branch_do(n, &branch)) {
+      db_impl->FlushWAL(true);
+      ReOpenNoDelete();
+      db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
+      seq = db_impl->GetLatestSequenceNumber();
+      ASSERT_EQ(exp_seq, seq);
+    }
 
     txn_t2(0);
     seq = db_impl->TEST_GetLastVisibleSequence();
@@ -4930,13 +4984,306 @@ TEST_P(TransactionTest, SeqAdvanceTest) {
       seq = db_impl->TEST_GetLastVisibleSequence();
       ASSERT_EQ(exp_seq, seq);
     }
-    if (branch_do(n, &branch)) {
+    if (!short_test && branch_do(n, &branch)) {
       db_impl->FlushWAL(true);
       ReOpenNoDelete();
       db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
       seq = db_impl->GetLatestSequenceNumber();
       ASSERT_EQ(exp_seq, seq);
     }
+  }
+}
+
+// Verify that the optimization would not compromize the correctness
+TEST_P(TransactionTest, Optimizations) {
+  size_t comb_cnt = size_t(1) << 2;  // 2 is number of optimization vars
+  for (size_t new_comb = 0; new_comb < comb_cnt; new_comb++) {
+    TransactionDBWriteOptimizations optimizations;
+    optimizations.skip_concurrency_control = IsInCombination(0, new_comb);
+    optimizations.skip_duplicate_key_check = IsInCombination(1, new_comb);
+
+    ReOpen();
+    WriteOptions write_options;
+    WriteBatch batch;
+    batch.Put(Slice("k"), Slice("v1"));
+    ASSERT_OK(db->Write(write_options, &batch));
+
+    ReadOptions ropt;
+    PinnableSlice pinnable_val;
+    ASSERT_OK(db->Get(ropt, db->DefaultColumnFamily(), "k", &pinnable_val));
+    ASSERT_TRUE(pinnable_val == ("v1"));
+  }
+}
+
+// Test that the transactional db can handle duplicate keys in the write batch
+TEST_P(TransactionTest, DuplicateKeys) {
+  ColumnFamilyOptions cf_options;
+  std::string cf_name = "two";
+  ColumnFamilyHandle* cf_handle = nullptr;
+  {
+    db->CreateColumnFamily(cf_options, cf_name, &cf_handle);
+    WriteOptions write_options;
+    WriteBatch batch;
+    batch.Put(Slice("key"), Slice("value"));
+    batch.Put(Slice("key2"), Slice("value2"));
+    // duplicate the keys
+    batch.Put(Slice("key"), Slice("value3"));
+    // duplicate the 2nd key. It should not be counted duplicate since a
+    // sub-patch is cut after the last duplicate.
+    batch.Put(Slice("key2"), Slice("value4"));
+    // duplicate the keys but in a different cf. It should not be counted as
+    // duplicate keys
+    batch.Put(cf_handle, Slice("key"), Slice("value5"));
+
+    ASSERT_OK(db->Write(write_options, &batch));
+
+    ReadOptions ropt;
+    PinnableSlice pinnable_val;
+    auto s = db->Get(ropt, db->DefaultColumnFamily(), "key", &pinnable_val);
+    ASSERT_OK(s);
+    ASSERT_TRUE(pinnable_val == ("value3"));
+    s = db->Get(ropt, db->DefaultColumnFamily(), "key2", &pinnable_val);
+    ASSERT_OK(s);
+    ASSERT_TRUE(pinnable_val == ("value4"));
+    s = db->Get(ropt, cf_handle, "key", &pinnable_val);
+    ASSERT_OK(s);
+    ASSERT_TRUE(pinnable_val == ("value5"));
+
+    delete cf_handle;
+  }
+
+  // Test with non-bytewise comparator
+  {
+    // A comparator that uses only the first three bytes
+    class ThreeBytewiseComparator : public Comparator {
+     public:
+      ThreeBytewiseComparator() {}
+      virtual const char* Name() const override {
+        return "test.ThreeBytewiseComparator";
+      }
+      virtual int Compare(const Slice& a, const Slice& b) const override {
+        Slice na = Slice(a.data(), a.size() < 3 ? a.size() : 3);
+        Slice nb = Slice(b.data(), b.size() < 3 ? b.size() : 3);
+        return na.compare(nb);
+      }
+      virtual bool Equal(const Slice& a, const Slice& b) const override {
+        Slice na = Slice(a.data(), a.size() < 3 ? a.size() : 3);
+        Slice nb = Slice(b.data(), b.size() < 3 ? b.size() : 3);
+        return na == nb;
+      }
+      // This methods below dont seem relevant to this test. Implement them if
+      // proven othersize.
+      void FindShortestSeparator(std::string* start,
+                                 const Slice& limit) const override {
+        const Comparator* bytewise_comp = BytewiseComparator();
+        bytewise_comp->FindShortestSeparator(start, limit);
+      }
+      void FindShortSuccessor(std::string* key) const override {
+        const Comparator* bytewise_comp = BytewiseComparator();
+        bytewise_comp->FindShortSuccessor(key);
+      }
+    };
+    ReOpen();
+    std::unique_ptr<const Comparator> comp_gc(new ThreeBytewiseComparator());
+    cf_options.comparator = comp_gc.get();
+    ASSERT_OK(db->CreateColumnFamily(cf_options, cf_name, &cf_handle));
+    WriteOptions write_options;
+    WriteBatch batch;
+    batch.Put(cf_handle, Slice("key"), Slice("value"));
+    // The first three bytes are the same, do it must be counted as duplicate
+    batch.Put(cf_handle, Slice("key2"), Slice("value2"));
+    ASSERT_OK(db->Write(write_options, &batch));
+
+    // The value must be the most recent value for all the keys equal to "key",
+    // including "key2"
+    ReadOptions ropt;
+    PinnableSlice pinnable_val;
+    ASSERT_OK(db->Get(ropt, cf_handle, "key", &pinnable_val));
+    ASSERT_TRUE(pinnable_val == ("value2"));
+
+    // Test duplicate keys with rollback
+    TransactionOptions txn_options;
+    Transaction* txn0 = db->BeginTransaction(write_options, txn_options);
+    ASSERT_OK(txn0->SetName("xid"));
+    ASSERT_OK(txn0->Put(cf_handle, Slice("key3"), Slice("value3")));
+    ASSERT_OK(txn0->Merge(cf_handle, Slice("key4"), Slice("value4")));
+    ASSERT_OK(txn0->Rollback());
+    ASSERT_OK(db->Get(ropt, cf_handle, "key5", &pinnable_val));
+    ASSERT_TRUE(pinnable_val == ("value2"));
+    delete txn0;
+
+    delete cf_handle;
+    cf_options.comparator = BytewiseComparator();
+  }
+
+  for (bool do_prepare : {true, false}) {
+    for (bool do_rollback : {true, false}) {
+      for (bool with_commit_batch : {true, false}) {
+        if (with_commit_batch && !do_prepare) {
+          continue;
+        }
+        if (with_commit_batch && do_rollback) {
+          continue;
+        }
+        ReOpen();
+        db->CreateColumnFamily(cf_options, cf_name, &cf_handle);
+        TransactionOptions txn_options;
+        txn_options.use_only_the_last_commit_time_batch_for_recovery = false;
+        WriteOptions write_options;
+        Transaction* txn0 = db->BeginTransaction(write_options, txn_options);
+        auto s = txn0->SetName("xid");
+        ASSERT_OK(s);
+        s = txn0->Put(Slice("foo0"), Slice("bar0a"));
+        ASSERT_OK(s);
+        s = txn0->Put(Slice("foo0"), Slice("bar0b"));
+        ASSERT_OK(s);
+        s = txn0->Put(Slice("foo1"), Slice("bar1"));
+        ASSERT_OK(s);
+        s = txn0->Merge(Slice("foo2"), Slice("bar2a"));
+        ASSERT_OK(s);
+        // Repeat a key after the start of a sub-patch. This should not cause a
+        // duplicate in the most recent sub-patch and hence not creating a new
+        // sub-patch.
+        s = txn0->Put(Slice("foo0"), Slice("bar0c"));
+        ASSERT_OK(s);
+        s = txn0->Merge(Slice("foo2"), Slice("bar2b"));
+        ASSERT_OK(s);
+        // duplicate the keys but in a different cf. It should not be counted as
+        // duplicate.
+        s = txn0->Put(cf_handle, Slice("foo0"), Slice("bar0-cf1"));
+        ASSERT_OK(s);
+        s = txn0->Put(Slice("foo3"), Slice("bar3"));
+        ASSERT_OK(s);
+        s = txn0->Merge(Slice("foo3"), Slice("bar3"));
+        ASSERT_OK(s);
+        s = txn0->Put(Slice("foo4"), Slice("bar4"));
+        ASSERT_OK(s);
+        s = txn0->Delete(Slice("foo4"));
+        ASSERT_OK(s);
+        s = txn0->SingleDelete(Slice("foo4"));
+        ASSERT_OK(s);
+        if (do_prepare) {
+          s = txn0->Prepare();
+          ASSERT_OK(s);
+        }
+        if (do_rollback) {
+          // Test rolling back the batch with duplicates
+          s = txn0->Rollback();
+          ASSERT_OK(s);
+        } else {
+          if (with_commit_batch) {
+            assert(do_prepare);
+            auto cb = txn0->GetCommitTimeWriteBatch();
+            // duplicate a key in the original batch
+            // TODO(myabandeh): the behavior of GetCommitTimeWriteBatch
+            // conflicting with the prepared batch is currently undefined and
+            // gives different results in different implementations.
+
+            // s = cb->Put(Slice("foo0"), Slice("bar0d"));
+            // ASSERT_OK(s);
+            // add a new duplicate key
+            s = cb->Put(Slice("foo6"), Slice("bar6a"));
+            ASSERT_OK(s);
+            s = cb->Put(Slice("foo6"), Slice("bar6b"));
+            ASSERT_OK(s);
+            // add a duplicate key that is removed in the same batch
+            s = cb->Put(Slice("foo7"), Slice("bar7a"));
+            ASSERT_OK(s);
+            s = cb->Delete(Slice("foo7"));
+            ASSERT_OK(s);
+          }
+          s = txn0->Commit();
+          ASSERT_OK(s);
+        }
+        if (!do_prepare && !do_rollback) {
+          auto pdb = reinterpret_cast<PessimisticTransactionDB*>(db);
+          pdb->UnregisterTransaction(txn0);
+        }
+        delete txn0;
+        ReadOptions ropt;
+        PinnableSlice pinnable_val;
+
+        if (do_rollback) {
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo0", &pinnable_val);
+          ASSERT_TRUE(s.IsNotFound());
+          s = db->Get(ropt, cf_handle, "foo0", &pinnable_val);
+          ASSERT_TRUE(s.IsNotFound());
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo1", &pinnable_val);
+          ASSERT_TRUE(s.IsNotFound());
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo2", &pinnable_val);
+          ASSERT_TRUE(s.IsNotFound());
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo3", &pinnable_val);
+          ASSERT_TRUE(s.IsNotFound());
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo4", &pinnable_val);
+          ASSERT_TRUE(s.IsNotFound());
+        } else {
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo0", &pinnable_val);
+          ASSERT_OK(s);
+          ASSERT_TRUE(pinnable_val == ("bar0c"));
+          s = db->Get(ropt, cf_handle, "foo0", &pinnable_val);
+          ASSERT_OK(s);
+          ASSERT_TRUE(pinnable_val == ("bar0-cf1"));
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo1", &pinnable_val);
+          ASSERT_OK(s);
+          ASSERT_TRUE(pinnable_val == ("bar1"));
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo2", &pinnable_val);
+          ASSERT_OK(s);
+          ASSERT_TRUE(pinnable_val == ("bar2a,bar2b"));
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo3", &pinnable_val);
+          ASSERT_OK(s);
+          ASSERT_TRUE(pinnable_val == ("bar3,bar3"));
+          s = db->Get(ropt, db->DefaultColumnFamily(), "foo4", &pinnable_val);
+          ASSERT_TRUE(s.IsNotFound());
+          if (with_commit_batch) {
+            s = db->Get(ropt, db->DefaultColumnFamily(), "foo6", &pinnable_val);
+            ASSERT_OK(s);
+            ASSERT_TRUE(pinnable_val == ("bar6b"));
+            s = db->Get(ropt, db->DefaultColumnFamily(), "foo7", &pinnable_val);
+            ASSERT_TRUE(s.IsNotFound());
+          }
+        }
+        delete cf_handle;
+      }  // with_commit_batch
+    }    // do_rollback
+  }      // do_prepare
+
+  {
+    // Also test with max_successive_merges > 0. max_successive_merges will not
+    // affect our algorithm for duplicate key insertion but we add the test to
+    // verify that.
+    cf_options.max_successive_merges = 2;
+    cf_options.merge_operator = MergeOperators::CreateStringAppendOperator();
+    ReOpen();
+    db->CreateColumnFamily(cf_options, cf_name, &cf_handle);
+    WriteOptions write_options;
+    // Ensure one value for the key
+    db->Put(write_options, cf_handle, Slice("key"), Slice("value"));
+    WriteBatch batch;
+    // Merge more than max_successive_merges times
+    batch.Merge(cf_handle, Slice("key"), Slice("1"));
+    batch.Merge(cf_handle, Slice("key"), Slice("2"));
+    batch.Merge(cf_handle, Slice("key"), Slice("3"));
+    batch.Merge(cf_handle, Slice("key"), Slice("4"));
+    ASSERT_OK(db->Write(write_options, &batch));
+    ReadOptions read_options;
+    string value;
+    ASSERT_OK(db->Get(read_options, cf_handle, "key", &value));
+    ASSERT_EQ(value, "value,1,2,3,4");
+    delete cf_handle;
+  }
+
+  {
+    // Test that the duplicate detection is not compromised after rolling back
+    // to a save point
+    TransactionOptions txn_options;
+    WriteOptions write_options;
+    Transaction* txn0 = db->BeginTransaction(write_options, txn_options);
+    ASSERT_OK(txn0->Put(Slice("foo0"), Slice("bar0a")));
+    ASSERT_OK(txn0->Put(Slice("foo0"), Slice("bar0b")));
+    txn0->SetSavePoint();
+    txn0->RollbackToSavePoint();
+    ASSERT_OK(txn0->Commit());
+    delete txn0;
   }
 }
 

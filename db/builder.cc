@@ -75,7 +75,7 @@ Status BuildTable(
     InternalStats* internal_stats, TableFileCreationReason reason,
     EventLogger* event_logger, int job_id, const Env::IOPriority io_priority,
     TableProperties* table_properties, int level, const uint64_t creation_time,
-    const uint64_t oldest_key_time) {
+    const uint64_t oldest_key_time, Env::WriteLifeTimeHint write_hint) {
   assert((column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          column_family_name.empty());
@@ -117,6 +117,7 @@ Status BuildTable(
         return s;
       }
       file->SetIOPriority(io_priority);
+      file->SetWriteLifeTimeHint(write_hint);
 
       file_writer.reset(new WritableFileWriter(std::move(file), env_options,
                                                ioptions.statistics));
@@ -130,11 +131,13 @@ Status BuildTable(
     MergeHelper merge(env, internal_comparator.user_comparator(),
                       ioptions.merge_operator, nullptr, ioptions.info_log,
                       true /* internal key corruption is not ok */,
-                      snapshots.empty() ? 0 : snapshots.back());
+                      snapshots.empty() ? 0 : snapshots.back()
+                      snapshot_checker);
     MergeHelper merge2(env, internal_comparator.user_comparator(),
                       ioptions.merge_operator, nullptr, ioptions.info_log,
                       true /* internal key corruption is not ok */,
-                      snapshots.empty() ? 0 : snapshots.back());
+                      snapshots.empty() ? 0 : snapshots.back()
+                      snapshot_checker);
 
     CompactionIterator c_iter(
         iter, internal_comparator.user_comparator(), &merge, kMaxSequenceNumber,

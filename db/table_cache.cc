@@ -49,7 +49,7 @@ static void UnrefEntry(void* arg1, void* arg2) {
 }
 
 static void DeleteTableReader(void* arg1, void* arg2) {
-  TableReaderPtrHolder* table_reader = reinterpret_cast<TableReaderPtrHolder*>(arg1);
+  TableReader* table_reader = reinterpret_cast<TableReader*>(arg1);
   delete table_reader;
 }
 
@@ -232,7 +232,9 @@ InternalIterator* TableCache::NewIterator(
                              &use_direct_reads_for_compaction);
 #endif  // !NDEBUG
     if (ioptions_.new_table_reader_for_compaction_inputs) {
-      readahead = ioptions_.compaction_readahead_size;
+      // get compaction_readahead_size from env_options allows us to set the
+      // value dynamically
+      readahead = env_options.compaction_readahead_size;
       create_new_table_reader = true;
     }
   } else {
@@ -321,9 +323,8 @@ InternalIterator* TableCache::NewRangeTombstoneIterator(
     const InternalKeyComparator& icomparator, const FileDescriptor& fd,
     HistogramImpl* file_read_hist, bool skip_filters, int level) {
   Status s;
-  TableReader* table_reader = nullptr;
   Cache::Handle* handle = nullptr;
-  table_reader = fd.table_reader;
+  TableReader* table_reader = fd.table_reader;
   if (table_reader == nullptr) {
     s = FindTable(env_options, icomparator, fd, &handle, &table_reader,
                   options.read_tier == kBlockCacheTier /* no_io */,

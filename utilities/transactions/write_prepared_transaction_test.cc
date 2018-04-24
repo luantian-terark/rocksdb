@@ -112,6 +112,169 @@ TEST(PreparedHeap, BasicsTest) {
   ASSERT_TRUE(heap.empty());
 }
 
+// This is a scenario reconstructed from a buggy trace. Test that the bug does
+// not resurface again.
+TEST(PreparedHeap, EmptyAtTheEnd) {
+  WritePreparedTxnDB::PreparedHeap heap;
+  heap.push(40l);
+  ASSERT_EQ(40l, heap.top());
+  // Although not a recommended scenario, we must be resilient against erase
+  // without a prior push.
+  heap.erase(50l);
+  ASSERT_EQ(40l, heap.top());
+  heap.push(60l);
+  ASSERT_EQ(40l, heap.top());
+
+  heap.erase(60l);
+  ASSERT_EQ(40l, heap.top());
+  heap.erase(40l);
+  ASSERT_TRUE(heap.empty());
+
+  heap.push(40l);
+  ASSERT_EQ(40l, heap.top());
+  heap.erase(50l);
+  ASSERT_EQ(40l, heap.top());
+  heap.push(60l);
+  ASSERT_EQ(40l, heap.top());
+
+  heap.erase(40l);
+  // Test that the erase has not emptied the heap (we had a bug doing that)
+  ASSERT_FALSE(heap.empty());
+  ASSERT_EQ(60l, heap.top());
+  heap.erase(60l);
+  ASSERT_TRUE(heap.empty());
+}
+
+// Generate random order of PreparedHeap access and test that the heap will be
+// successfully emptied at the end.
+TEST(PreparedHeap, Concurrent) {
+  const size_t t_cnt = 10;
+  rocksdb::port::Thread t[t_cnt];
+  Random rnd(1103);
+  WritePreparedTxnDB::PreparedHeap heap;
+  port::RWMutex prepared_mutex;
+
+  for (size_t n = 0; n < 100; n++) {
+    for (size_t i = 0; i < t_cnt; i++) {
+      // This is not recommended usage but we should be resilient against it.
+      bool skip_push = rnd.OneIn(5);
+      t[i] = rocksdb::port::Thread([&heap, &prepared_mutex, skip_push, i]() {
+        auto seq = i;
+        std::this_thread::yield();
+        if (!skip_push) {
+          WriteLock wl(&prepared_mutex);
+          heap.push(seq);
+        }
+        std::this_thread::yield();
+        {
+          WriteLock wl(&prepared_mutex);
+          heap.erase(seq);
+        }
+      });
+    }
+    for (size_t i = 0; i < t_cnt; i++) {
+      t[i].join();
+    }
+    ASSERT_TRUE(heap.empty());
+  }
+}
+
+// Test that WriteBatchWithIndex correctly counts the number of sub-batches
+TEST(WriteBatchWithIndex, SubBatchCnt) {
+  ColumnFamilyOptions cf_options;
+  std::string cf_name = "two";
+  DB* db;
+  Options options;
+  options.create_if_missing = true;
+  const std::string dbname = test::TmpDir() + "/transaction_testdb";
+  DestroyDB(dbname, options);
+  ASSERT_OK(DB::Open(options, dbname, &db));
+  ColumnFamilyHandle* cf_handle = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf_options, cf_name, &cf_handle));
+  WriteOptions write_options;
+  size_t batch_cnt = 1;
+  size_t save_points = 0;
+  std::vector<size_t> batch_cnt_at;
+  WriteBatchWithIndex batch(db->DefaultColumnFamily()->GetComparator(), 0, true,
+                            0);
+  ASSERT_EQ(batch_cnt, batch.SubBatchCnt());
+  batch_cnt_at.push_back(batch_cnt);
+  batch.SetSavePoint();
+  save_points++;
+  batch.Put(Slice("key"), Slice("value"));
+  ASSERT_EQ(batch_cnt, batch.SubBatchCnt());
+  batch_cnt_at.push_back(batch_cnt);
+  batch.SetSavePoint();
+  save_points++;
+  batch.Put(Slice("key2"), Slice("value2"));
+  ASSERT_EQ(batch_cnt, batch.SubBatchCnt());
+  // duplicate the keys
+  batch_cnt_at.push_back(batch_cnt);
+  batch.SetSavePoint();
+  save_points++;
+  batch.Put(Slice("key"), Slice("value3"));
+  batch_cnt++;
+  ASSERT_EQ(batch_cnt, batch.SubBatchCnt());
+  // duplicate the 2nd key. It should not be counted duplicate since a
+  // sub-patch is cut after the last duplicate.
+  batch_cnt_at.push_back(batch_cnt);
+  batch.SetSavePoint();
+  save_points++;
+  batch.Put(Slice("key2"), Slice("value4"));
+  ASSERT_EQ(batch_cnt, batch.SubBatchCnt());
+  // duplicate the keys but in a different cf. It should not be counted as
+  // duplicate keys
+  batch_cnt_at.push_back(batch_cnt);
+  batch.SetSavePoint();
+  save_points++;
+  batch.Put(cf_handle, Slice("key"), Slice("value5"));
+  ASSERT_EQ(batch_cnt, batch.SubBatchCnt());
+
+  // Test that the number of sub-batches matches what we count with
+  // SubBatchCounter
+  std::map<uint32_t, const Comparator*> comparators;
+  comparators[0] = db->DefaultColumnFamily()->GetComparator();
+  comparators[cf_handle->GetID()] = cf_handle->GetComparator();
+  SubBatchCounter counter(comparators);
+  ASSERT_OK(batch.GetWriteBatch()->Iterate(&counter));
+  ASSERT_EQ(batch_cnt, counter.BatchCount());
+
+  // Test that RollbackToSavePoint will properly resets the number of
+  // sub-bathces
+  for (size_t i = save_points; i > 0; i--) {
+    batch.RollbackToSavePoint();
+    ASSERT_EQ(batch_cnt_at[i - 1], batch.SubBatchCnt());
+  }
+
+  // Test the count is right with random batches
+  {
+    const size_t TOTAL_KEYS = 20;  // 20 ~= 10 to cause a few randoms
+    Random rnd(1131);
+    std::string keys[TOTAL_KEYS];
+    for (size_t k = 0; k < TOTAL_KEYS; k++) {
+      int len = static_cast<int>(rnd.Uniform(50));
+      keys[k] = test::RandomKey(&rnd, len);
+    }
+    for (size_t i = 0; i < 1000; i++) {  // 1000 random batches
+      WriteBatchWithIndex rndbatch(db->DefaultColumnFamily()->GetComparator(),
+                                   0, true, 0);
+      for (size_t k = 0; k < 10; k++) {  // 10 key per batch
+        size_t ki = static_cast<size_t>(rnd.Uniform(TOTAL_KEYS));
+        Slice key = Slice(keys[ki]);
+        std::string buffer;
+        Slice value = Slice(test::RandomString(&rnd, 16, &buffer));
+        rndbatch.Put(key, value);
+      }
+      SubBatchCounter batch_counter(comparators);
+      ASSERT_OK(rndbatch.GetWriteBatch()->Iterate(&batch_counter));
+      ASSERT_EQ(rndbatch.SubBatchCnt(), batch_counter.BatchCount());
+    }
+  }
+
+  delete cf_handle;
+  delete db;
+}
+
 TEST(CommitEntry64b, BasicTest) {
   const size_t INDEX_BITS = static_cast<size_t>(21);
   const size_t INDEX_SIZE = static_cast<size_t>(1ull << INDEX_BITS);
@@ -181,7 +344,12 @@ class WritePreparedTxnDBMock : public WritePreparedTxnDB {
   std::vector<SequenceNumber> snapshots_;
 };
 
-class WritePreparedTransactionTest : public TransactionTest {
+class WritePreparedTransactionTestBase : public TransactionTestBase {
+ public:
+  WritePreparedTransactionTestBase(bool use_stackable_db, bool two_write_queue,
+                                   TxnDBWritePolicy write_policy)
+      : TransactionTestBase(use_stackable_db, two_write_queue, write_policy){};
+
  protected:
   // If expect_update is set, check if it actually updated old_commit_map_. If
   // it did not and yet suggested not to check the next snapshot, do the
@@ -305,6 +473,20 @@ class WritePreparedTransactionTest : public TransactionTest {
       } else {
         ASSERT_EQ(kv.second, "NOT_FOUND");
       }
+
+      // Try with MultiGet API too
+      std::vector<std::string> values;
+      auto s_vec = db->MultiGet(read_options, {db->DefaultColumnFamily()},
+                                {kv.first}, &values);
+      ASSERT_EQ(1, values.size());
+      ASSERT_EQ(1, s_vec.size());
+      s = s_vec[0];
+      ASSERT_TRUE(s.ok() || s.IsNotFound());
+      if (s.ok()) {
+        ASSERT_TRUE(kv.second == values[0]);
+      } else {
+        ASSERT_EQ(kv.second, "NOT_FOUND");
+      }
     }
   }
 
@@ -328,10 +510,86 @@ class WritePreparedTransactionTest : public TransactionTest {
   }
 };
 
+class WritePreparedTransactionTest
+    : public WritePreparedTransactionTestBase,
+      virtual public ::testing::WithParamInterface<
+          std::tuple<bool, bool, TxnDBWritePolicy>> {
+ public:
+  WritePreparedTransactionTest()
+      : WritePreparedTransactionTestBase(std::get<0>(GetParam()),
+                                         std::get<1>(GetParam()),
+                                         std::get<2>(GetParam())){};
+};
+
+class SnapshotConcurrentAccessTest
+    : public WritePreparedTransactionTestBase,
+      virtual public ::testing::WithParamInterface<
+          std::tuple<bool, bool, TxnDBWritePolicy, size_t, size_t>> {
+ public:
+  SnapshotConcurrentAccessTest()
+      : WritePreparedTransactionTestBase(std::get<0>(GetParam()),
+                                         std::get<1>(GetParam()),
+                                         std::get<2>(GetParam())),
+        split_id_(std::get<3>(GetParam())),
+        split_cnt_(std::get<4>(GetParam())){};
+
+ protected:
+  // A test is split into split_cnt_ tests, each identified with split_id_ where
+  // 0 <= split_id_ < split_cnt_
+  size_t split_id_;
+  size_t split_cnt_;
+};
+
 INSTANTIATE_TEST_CASE_P(
     WritePreparedTransactionTest, WritePreparedTransactionTest,
     ::testing::Values(std::make_tuple(false, false, WRITE_PREPARED),
                       std::make_tuple(false, true, WRITE_PREPARED)));
+
+INSTANTIATE_TEST_CASE_P(
+    TwoWriteQueues, SnapshotConcurrentAccessTest,
+    ::testing::Values(std::make_tuple(false, true, WRITE_PREPARED, 0, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 1, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 2, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 3, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 4, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 5, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 6, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 7, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 8, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 9, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 10, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 11, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 12, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 13, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 14, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 15, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 16, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 17, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 18, 20),
+                      std::make_tuple(false, true, WRITE_PREPARED, 19, 20)));
+
+INSTANTIATE_TEST_CASE_P(
+    OneWriteQueue, SnapshotConcurrentAccessTest,
+    ::testing::Values(std::make_tuple(false, false, WRITE_PREPARED, 0, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 1, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 2, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 3, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 4, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 5, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 6, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 7, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 8, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 9, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 10, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 11, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 12, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 13, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 14, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 15, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 16, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 17, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 18, 20),
+                      std::make_tuple(false, false, WRITE_PREPARED, 19, 20)));
 
 TEST_P(WritePreparedTransactionTest, CommitMapTest) {
   WritePreparedTxnDB* wp_db = dynamic_cast<WritePreparedTxnDB*>(db);
@@ -422,6 +680,83 @@ TEST_P(WritePreparedTransactionTest, MaybeUpdateOldCommitMap) {
   MaybeUpdateOldCommitMapTestWithNext(p, c, s, ns, false);
 }
 
+// Test that the entries in old_commit_map_ get garbage collected properly
+TEST_P(WritePreparedTransactionTest, OldCommitMapGC) {
+  const size_t snapshot_cache_bits = 0;
+  const size_t commit_cache_bits = 0;
+  DBImpl* mock_db = new DBImpl(options, dbname);
+  std::unique_ptr<WritePreparedTxnDBMock> wp_db(new WritePreparedTxnDBMock(
+      mock_db, txn_db_options, snapshot_cache_bits, commit_cache_bits));
+
+  SequenceNumber seq = 0;
+  // Take the first snapshot that overlaps with two txn
+  auto prep_seq = ++seq;
+  wp_db->AddPrepared(prep_seq);
+  auto prep_seq2 = ++seq;
+  wp_db->AddPrepared(prep_seq2);
+  auto snap_seq1 = seq;
+  wp_db->TakeSnapshot(snap_seq1);
+  auto commit_seq = ++seq;
+  wp_db->AddCommitted(prep_seq, commit_seq);
+  auto commit_seq2 = ++seq;
+  wp_db->AddCommitted(prep_seq2, commit_seq2);
+  // Take the 2nd and 3rd snapshot that overlap with the same txn
+  prep_seq = ++seq;
+  wp_db->AddPrepared(prep_seq);
+  auto snap_seq2 = seq;
+  wp_db->TakeSnapshot(snap_seq2);
+  seq++;
+  auto snap_seq3 = seq;
+  wp_db->TakeSnapshot(snap_seq3);
+  seq++;
+  commit_seq = ++seq;
+  wp_db->AddCommitted(prep_seq, commit_seq);
+  // Make sure max_evicted_seq_ will be larger than 2nd snapshot by evicting the
+  // only item in the commit_cache_ via another commit.
+  prep_seq = ++seq;
+  wp_db->AddPrepared(prep_seq);
+  commit_seq = ++seq;
+  wp_db->AddCommitted(prep_seq, commit_seq);
+
+  // Verify that the evicted commit entries for all snapshots are in the
+  // old_commit_map_
+  {
+    ASSERT_FALSE(wp_db->old_commit_map_empty_.load());
+    ReadLock rl(&wp_db->old_commit_map_mutex_);
+    ASSERT_EQ(3, wp_db->old_commit_map_.size());
+    ASSERT_EQ(2, wp_db->old_commit_map_[snap_seq1].size());
+    ASSERT_EQ(1, wp_db->old_commit_map_[snap_seq2].size());
+    ASSERT_EQ(1, wp_db->old_commit_map_[snap_seq3].size());
+  }
+
+  // Verify that the 2nd snapshot is cleaned up after the release
+  wp_db->ReleaseSnapshotInternal(snap_seq2);
+  {
+    ASSERT_FALSE(wp_db->old_commit_map_empty_.load());
+    ReadLock rl(&wp_db->old_commit_map_mutex_);
+    ASSERT_EQ(2, wp_db->old_commit_map_.size());
+    ASSERT_EQ(2, wp_db->old_commit_map_[snap_seq1].size());
+    ASSERT_EQ(1, wp_db->old_commit_map_[snap_seq3].size());
+  }
+
+  // Verify that the 1st snapshot is cleaned up after the release
+  wp_db->ReleaseSnapshotInternal(snap_seq1);
+  {
+    ASSERT_FALSE(wp_db->old_commit_map_empty_.load());
+    ReadLock rl(&wp_db->old_commit_map_mutex_);
+    ASSERT_EQ(1, wp_db->old_commit_map_.size());
+    ASSERT_EQ(1, wp_db->old_commit_map_[snap_seq3].size());
+  }
+
+  // Verify that the 3rd snapshot is cleaned up after the release
+  wp_db->ReleaseSnapshotInternal(snap_seq3);
+  {
+    ASSERT_TRUE(wp_db->old_commit_map_empty_.load());
+    ReadLock rl(&wp_db->old_commit_map_mutex_);
+    ASSERT_EQ(0, wp_db->old_commit_map_.size());
+  }
+}
+
 TEST_P(WritePreparedTransactionTest, CheckAgainstSnapshotsTest) {
   std::vector<SequenceNumber> snapshots = {100l, 200l, 300l, 400l, 500l,
                                            600l, 700l, 800l, 900l};
@@ -455,14 +790,11 @@ TEST_P(WritePreparedTransactionTest, CheckAgainstSnapshotsTest) {
   }
 }
 
-// Return true if the ith bit is set in combination represented by comb
-bool IsInCombination(size_t i, size_t comb) { return comb & (size_t(1) << i); }
-
 // This test is too slow for travis
 #ifndef TRAVIS
 // Test that CheckAgainstSnapshots will not miss a live snapshot if it is run in
 // parallel with UpdateSnapshots.
-TEST_P(WritePreparedTransactionTest, SnapshotConcurrentAccessTest) {
+TEST_P(SnapshotConcurrentAccessTest, SnapshotConcurrentAccessTest) {
   // We have a sync point in the method under test after checking each snapshot.
   // If you increase the max number of snapshots in this test, more sync points
   // in the methods must also be added.
@@ -478,8 +810,10 @@ TEST_P(WritePreparedTransactionTest, SnapshotConcurrentAccessTest) {
   DBImpl* mock_db = new DBImpl(options, dbname);
   std::unique_ptr<WritePreparedTxnDBMock> wp_db(
       new WritePreparedTxnDBMock(mock_db, txn_db_options, snapshot_cache_bits));
-  // Add up to 2 items that do not fit into the cache
-  for (size_t old_size = 1; old_size <= wp_db->SNAPSHOT_CACHE_SIZE + 2;
+  const size_t extra = 2;
+  size_t loop_id = 0;
+  // Add up to extra items that do not fit into the cache
+  for (size_t old_size = 1; old_size <= wp_db->SNAPSHOT_CACHE_SIZE + extra;
        old_size++) {
     const std::vector<SequenceNumber> old_snapshots(
         snapshots.begin(), snapshots.begin() + old_size);
@@ -487,7 +821,8 @@ TEST_P(WritePreparedTransactionTest, SnapshotConcurrentAccessTest) {
     // Each member of old snapshot might or might not appear in the new list. We
     // create a common_snapshots for each combination.
     size_t new_comb_cnt = size_t(1) << old_size;
-    for (size_t new_comb = 0; new_comb < new_comb_cnt; new_comb++) {
+    for (size_t new_comb = 0; new_comb < new_comb_cnt; new_comb++, loop_id++) {
+      if (loop_id % split_cnt_ != split_id_) continue;
       printf(".");  // To signal progress
       fflush(stdout);
       std::vector<SequenceNumber> common_snapshots;
@@ -535,7 +870,7 @@ TEST_P(WritePreparedTransactionTest, SnapshotConcurrentAccessTest) {
   }
   printf("\n");
 }
-#endif
+#endif  // TRAVIS
 
 // This test clarifies the contract of AdvanceMaxEvictedSeq method
 TEST_P(WritePreparedTransactionTest, AdvanceMaxEvictedSeqBasicTest) {
@@ -605,12 +940,13 @@ TEST_P(WritePreparedTransactionTest, SeqAdvanceConcurrentTest) {
   FlushOptions fopt;
 
   // Number of different txn types we use in this test
-  const size_t type_cnt = 4;
+  const size_t type_cnt = 5;
   // The size of the first write group
   // TODO(myabandeh): This should be increase for pre-release tests
   const size_t first_group_size = 2;
   // Total number of txns we run in each test
-  const size_t txn_cnt = first_group_size * 2;
+  // TODO(myabandeh): This should be increase for pre-release tests
+  const size_t txn_cnt = first_group_size + 1;
 
   size_t base[txn_cnt + 1] = {
       1,
@@ -675,6 +1011,9 @@ TEST_P(WritePreparedTransactionTest, SeqAdvanceConcurrentTest) {
         case 3:
           threads.emplace_back(txn_t3, bi);
           break;
+        case 4:
+          threads.emplace_back(txn_t3, bi);
+          break;
         default:
           assert(false);
       }
@@ -709,17 +1048,11 @@ TEST_P(WritePreparedTransactionTest, SeqAdvanceConcurrentTest) {
     rocksdb::SyncPoint::GetInstance()->DisableProcessing();
     rocksdb::SyncPoint::GetInstance()->ClearAllCallBacks();
 
-    // The latest seq might be due to a commit without prepare and hence not
-    // persisted in the WAL. To make the verification of seq after recovery
-    // easier we write in a transaction with prepare which makes the latest seq
-    // to be persisted via the commitmarker.
-    txn_t3(0);
-
     // Check if recovery preserves the last sequence number
     db_impl->FlushWAL(true);
     ReOpenNoDelete();
     db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
-    seq = db_impl->GetLatestSequenceNumber();
+    seq = db_impl->TEST_GetLastVisibleSequence();
     ASSERT_EQ(exp_seq, seq);
 
     // Check if flush preserves the last sequence number
@@ -782,6 +1115,7 @@ TEST_P(WritePreparedTransactionTest, BasicRecoveryTest) {
   delete txn0;
   delete txn1;
   wp_db->db_impl_->FlushWAL(true);
+  wp_db->TEST_Crash();
   ReOpenNoDelete();
   wp_db = dynamic_cast<WritePreparedTxnDB*>(db);
   // After recovery, all the uncommitted txns (0 and 1) should be inserted into
@@ -825,6 +1159,7 @@ TEST_P(WritePreparedTransactionTest, BasicRecoveryTest) {
 
   delete txn2;
   wp_db->db_impl_->FlushWAL(true);
+  wp_db->TEST_Crash();
   ReOpenNoDelete();
   wp_db = dynamic_cast<WritePreparedTxnDB*>(db);
   ASSERT_TRUE(wp_db->prepared_txns_.empty());
@@ -894,6 +1229,7 @@ TEST_P(WritePreparedTransactionTest, ConflictDetectionAfterRecoveryTest) {
 
   auto db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
   db_impl->FlushWAL(true);
+  dynamic_cast<WritePreparedTxnDB*>(db)->TEST_Crash();
   ReOpenNoDelete();
 
   // It should still conflict after the recovery
@@ -1052,17 +1388,34 @@ TEST_P(WritePreparedTransactionTest, IsInSnapshotTest) {
   }
 }
 
-void ASSERT_SAME(TransactionDB* db, Status exp_s, PinnableSlice& exp_v,
-                 Slice key) {
+void ASSERT_SAME(ReadOptions roptions, TransactionDB* db, Status exp_s,
+                 PinnableSlice& exp_v, Slice key) {
   Status s;
   PinnableSlice v;
-  ReadOptions roptions;
   s = db->Get(roptions, db->DefaultColumnFamily(), key, &v);
   ASSERT_TRUE(exp_s == s);
   ASSERT_TRUE(s.ok() || s.IsNotFound());
   if (s.ok()) {
     ASSERT_TRUE(exp_v == v);
   }
+
+  // Try with MultiGet API too
+  std::vector<std::string> values;
+  auto s_vec =
+      db->MultiGet(roptions, {db->DefaultColumnFamily()}, {key}, &values);
+  ASSERT_EQ(1, values.size());
+  ASSERT_EQ(1, s_vec.size());
+  s = s_vec[0];
+  ASSERT_TRUE(exp_s == s);
+  ASSERT_TRUE(s.ok() || s.IsNotFound());
+  if (s.ok()) {
+    ASSERT_TRUE(exp_v == values[0]);
+  }
+}
+
+void ASSERT_SAME(TransactionDB* db, Status exp_s, PinnableSlice& exp_v,
+                 Slice key) {
+  ASSERT_SAME(ReadOptions(), db, exp_s, exp_v, key);
 }
 
 TEST_P(WritePreparedTransactionTest, RollbackTest) {
@@ -1134,25 +1487,19 @@ TEST_P(WritePreparedTransactionTest, RollbackTest) {
         ASSERT_SAME(db, s4, v4, "key4");
 
         if (crash) {
-          // TODO(myabandeh): replace it with true crash (commented lines below)
-          // after compaction PR is landed.
+          delete txn;
           auto db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
-          auto seq = db_impl->GetLatestSequenceNumber();
+          db_impl->FlushWAL(true);
+          dynamic_cast<WritePreparedTxnDB*>(db)->TEST_Crash();
+          ReOpenNoDelete();
           wp_db = dynamic_cast<WritePreparedTxnDB*>(db);
-          SequenceNumber prev_max = wp_db->max_evicted_seq_;
-          wp_db->AdvanceMaxEvictedSeq(prev_max, seq);
-          //    delete txn;
-          //    auto db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
-          //    db_impl->FlushWAL(true);
-          //    ReOpenNoDelete();
-          //    wp_db = dynamic_cast<WritePreparedTxnDB*>(db);
-          //    txn = db->GetTransactionByName("xid0");
-          //    ASSERT_FALSE(wp_db->delayed_prepared_empty_);
-          //    ReadLock rl(&wp_db->prepared_mutex_);
-          //    ASSERT_TRUE(wp_db->prepared_txns_.empty());
-          //    ASSERT_FALSE(wp_db->delayed_prepared_.empty());
-          //    ASSERT_TRUE(wp_db->delayed_prepared_.find(txn->GetId()) !=
-          //                wp_db->delayed_prepared_.end());
+          txn = db->GetTransactionByName("xid0");
+          ASSERT_FALSE(wp_db->delayed_prepared_empty_);
+          ReadLock rl(&wp_db->prepared_mutex_);
+          ASSERT_TRUE(wp_db->prepared_txns_.empty());
+          ASSERT_FALSE(wp_db->delayed_prepared_.empty());
+          ASSERT_TRUE(wp_db->delayed_prepared_.find(txn->GetId()) !=
+                      wp_db->delayed_prepared_.end());
         }
 
         ASSERT_SAME(db, s1, v1, "key1");
@@ -1177,72 +1524,6 @@ TEST_P(WritePreparedTransactionTest, RollbackTest) {
         delete txn;
       }
     }
-  }
-}
-
-// TODO(myabandeh): move it to transaction_test when it is extended to
-// WROTE_PREPARED.
-
-// Test that the transactional db can handle duplicate keys in the write batch
-TEST_P(WritePreparedTransactionTest, DuplicateKeyTest) {
-  for (bool do_prepare : {true, false}) {
-    TransactionOptions txn_options;
-    WriteOptions write_options;
-    Transaction* txn0 = db->BeginTransaction(write_options, txn_options);
-    auto s = txn0->SetName("xid");
-    ASSERT_OK(s);
-    s = txn0->Put(Slice("foo0"), Slice("bar0a"));
-    ASSERT_OK(s);
-    s = txn0->Put(Slice("foo0"), Slice("bar0b"));
-    ASSERT_OK(s);
-    s = txn0->Put(Slice("foo1"), Slice("bar1"));
-    ASSERT_OK(s);
-    s = txn0->Merge(Slice("foo2"), Slice("bar2a"));
-    ASSERT_OK(s);
-    // TODO(myabandeh): enable this after duplicatae merge keys are supported
-    // s = txn0->Merge(Slice("foo2"), Slice("bar2a"));
-    // ASSERT_OK(s);
-    s = txn0->Put(Slice("foo2"), Slice("bar2b"));
-    ASSERT_OK(s);
-    s = txn0->Put(Slice("foo3"), Slice("bar3"));
-    ASSERT_OK(s);
-    // TODO(myabandeh): enable this after duplicatae merge keys are supported
-    // s = txn0->Merge(Slice("foo3"), Slice("bar3"));
-    // ASSERT_OK(s);
-    s = txn0->Put(Slice("foo4"), Slice("bar4"));
-    ASSERT_OK(s);
-    s = txn0->Delete(Slice("foo4"));
-    ASSERT_OK(s);
-    s = txn0->SingleDelete(Slice("foo4"));
-    ASSERT_OK(s);
-    if (do_prepare) {
-      s = txn0->Prepare();
-      ASSERT_OK(s);
-    }
-    s = txn0->Commit();
-    ASSERT_OK(s);
-    if (!do_prepare) {
-      auto pdb = reinterpret_cast<PessimisticTransactionDB*>(db);
-      pdb->UnregisterTransaction(txn0);
-    }
-    delete txn0;
-    ReadOptions ropt;
-    PinnableSlice pinnable_val;
-
-    s = db->Get(ropt, db->DefaultColumnFamily(), "foo0", &pinnable_val);
-    ASSERT_OK(s);
-    ASSERT_TRUE(pinnable_val == ("bar0b"));
-    s = db->Get(ropt, db->DefaultColumnFamily(), "foo1", &pinnable_val);
-    ASSERT_OK(s);
-    ASSERT_TRUE(pinnable_val == ("bar1"));
-    s = db->Get(ropt, db->DefaultColumnFamily(), "foo2", &pinnable_val);
-    ASSERT_OK(s);
-    ASSERT_TRUE(pinnable_val == ("bar2b"));
-    s = db->Get(ropt, db->DefaultColumnFamily(), "foo3", &pinnable_val);
-    ASSERT_OK(s);
-    ASSERT_TRUE(pinnable_val == ("bar3"));
-    s = db->Get(ropt, db->DefaultColumnFamily(), "foo4", &pinnable_val);
-    ASSERT_TRUE(s.IsNotFound());
   }
 }
 
@@ -1549,7 +1830,12 @@ TEST_P(WritePreparedTransactionTest,
   ASSERT_EQ(++expected_seq, db->GetLatestSequenceNumber());
   SequenceNumber seq1 = expected_seq;
   ASSERT_OK(db->Put(WriteOptions(), "key2", "value2"));
-  ASSERT_EQ(++expected_seq, db->GetLatestSequenceNumber());
+  DBImpl* db_impl = reinterpret_cast<DBImpl*>(db->GetRootDB());
+  expected_seq++;  // one for data
+  if (options.two_write_queues) {
+    expected_seq++;  // one for commit
+  }
+  ASSERT_EQ(expected_seq, db_impl->TEST_GetLastVisibleSequence());
   ASSERT_OK(db->Flush(FlushOptions()));
   // Dummy keys to avoid compaction trivially move files and get around actual
   // compaction logic.
@@ -1627,6 +1913,84 @@ TEST_P(WritePreparedTransactionTest, Iterate) {
   VerifyKeys({{"foo", "v2"}});
   verify_iter("v2");
   delete transaction;
+}
+
+TEST_P(WritePreparedTransactionTest, IteratorRefreshNotSupported) {
+  Iterator* iter = db->NewIterator(ReadOptions());
+  ASSERT_TRUE(iter->Refresh().IsNotSupported());
+  delete iter;
+}
+
+// Test that updating the commit map will not affect the existing snapshots
+TEST_P(WritePreparedTransactionTest, AtomicCommit) {
+  for (bool skip_prepare : {true, false}) {
+    rocksdb::SyncPoint::GetInstance()->LoadDependency({
+        {"WritePreparedTxnDB::AddCommitted:start",
+         "AtomicCommit::GetSnapshot:start"},
+        {"AtomicCommit::Get:end",
+         "WritePreparedTxnDB::AddCommitted:start:pause"},
+        {"WritePreparedTxnDB::AddCommitted:end", "AtomicCommit::Get2:start"},
+        {"AtomicCommit::Get2:end",
+         "WritePreparedTxnDB::AddCommitted:end:pause:"},
+    });
+    rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+    rocksdb::port::Thread write_thread([&]() {
+      if (skip_prepare) {
+        db->Put(WriteOptions(), Slice("key"), Slice("value"));
+      } else {
+        Transaction* txn =
+            db->BeginTransaction(WriteOptions(), TransactionOptions());
+        ASSERT_OK(txn->SetName("xid"));
+        ASSERT_OK(txn->Put(Slice("key"), Slice("value")));
+        ASSERT_OK(txn->Prepare());
+        ASSERT_OK(txn->Commit());
+        delete txn;
+      }
+    });
+    rocksdb::port::Thread read_thread([&]() {
+      ReadOptions roptions;
+      TEST_SYNC_POINT("AtomicCommit::GetSnapshot:start");
+      roptions.snapshot = db->GetSnapshot();
+      PinnableSlice val;
+      auto s = db->Get(roptions, db->DefaultColumnFamily(), "key", &val);
+      TEST_SYNC_POINT("AtomicCommit::Get:end");
+      TEST_SYNC_POINT("AtomicCommit::Get2:start");
+      ASSERT_SAME(roptions, db, s, val, "key");
+      TEST_SYNC_POINT("AtomicCommit::Get2:end");
+      db->ReleaseSnapshot(roptions.snapshot);
+    });
+    read_thread.join();
+    write_thread.join();
+    rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  }
+}
+
+// Test that we can change write policy from WriteCommitted to WritePrepared
+// after a clean shutdown (which would empty the WAL)
+TEST_P(WritePreparedTransactionTest, WP_WC_DBBackwardCompatibility) {
+  bool empty_wal = true;
+  CrossCompatibilityTest(WRITE_COMMITTED, WRITE_PREPARED, empty_wal);
+}
+
+// Test that we fail fast if WAL is not emptied between changing the write
+// policy from WriteCommitted to WritePrepared
+TEST_P(WritePreparedTransactionTest, WP_WC_WALBackwardIncompatibility) {
+  bool empty_wal = true;
+  CrossCompatibilityTest(WRITE_COMMITTED, WRITE_PREPARED, !empty_wal);
+}
+
+// Test that we can change write policy from WritePrepare back to WriteCommitted
+// after a clean shutdown (which would empty the WAL)
+TEST_P(WritePreparedTransactionTest, WC_WP_ForwardCompatibility) {
+  bool empty_wal = true;
+  CrossCompatibilityTest(WRITE_PREPARED, WRITE_COMMITTED, empty_wal);
+}
+
+// Test that we fail fast if WAL is not emptied between changing the write
+// policy from WriteCommitted to WritePrepared
+TEST_P(WritePreparedTransactionTest, WC_WP_WALForwardIncompatibility) {
+  bool empty_wal = true;
+  CrossCompatibilityTest(WRITE_PREPARED, WRITE_COMMITTED, !empty_wal);
 }
 
 }  // namespace rocksdb

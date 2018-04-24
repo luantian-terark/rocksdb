@@ -11,8 +11,6 @@ int main() {
 }
 #else
 
-#include <gflags/gflags.h>
-
 #include <table/terark_zip_weak_function.h>
 
 #include "db/db_impl.h"
@@ -27,11 +25,12 @@ int main() {
 #include "table/plain_table_factory.h"
 #include "table/table_builder.h"
 #include "util/file_reader_writer.h"
+#include "util/gflags_compat.h"
 #include "util/testharness.h"
 #include "util/testutil.h"
 
-using GFLAGS::ParseCommandLineFlags;
-using GFLAGS::SetUsageMessage;
+using GFLAGS_NAMESPACE::ParseCommandLineFlags;
+using GFLAGS_NAMESPACE::SetUsageMessage;
 
 namespace rocksdb {
 

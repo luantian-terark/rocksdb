@@ -415,7 +415,7 @@ const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
     {BLOB_DB_WRITE_BLOB, "rocksdb.blobdb.write.blob"},
     {BLOB_DB_WRITE_BLOB_TTL, "rocksdb.blobdb.write.blob.ttl"},
     {BLOB_DB_BLOB_FILE_BYTES_WRITTEN, "rocksdb.blobdb.blob.file.bytes.written"},
-    {BLOB_DB_BLOB_FILE_BYTES_READ, "rocksdb.blobdb.blob.file,bytes.read"},
+    {BLOB_DB_BLOB_FILE_BYTES_READ, "rocksdb.blobdb.blob.file.bytes.read"},
     {BLOB_DB_BLOB_FILE_SYNCED, "rocksdb.blobdb.blob.file.synced"},
     {BLOB_DB_BLOB_INDEX_EXPIRED, "rocksdb.blobdb.blob.index.expired"},
     {BLOB_DB_GC_NUM_FILES, "rocksdb.blobdb.gc.num.files"},
@@ -510,6 +510,8 @@ enum Histograms : uint32_t {
   BLOB_DB_COMPRESSION_MICROS,
   // BlobDB decompression time.
   BLOB_DB_DECOMPRESSION_MICROS,
+  // Time spent flushing memtable to disk
+  FLUSH_TIME,
 
   HISTOGRAM_ENUM_MAX,  // TODO(ldemailly): enforce HistogramsNameMap match
 };
@@ -560,6 +562,7 @@ const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap = {
     {BLOB_DB_GC_MICROS, "rocksdb.blobdb.gc.micros"},
     {BLOB_DB_COMPRESSION_MICROS, "rocksdb.blobdb.compression.micros"},
     {BLOB_DB_DECOMPRESSION_MICROS, "rocksdb.blobdb.decompression.micros"},
+    {FLUSH_TIME, "rocksdb.db.flush.micros"},
 };
 
 struct HistogramData {
