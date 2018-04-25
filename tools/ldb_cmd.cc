@@ -637,8 +637,8 @@ Options LDBCommand::PrepareOptionsForOpenDB() {
       if (use_terarkdb) {
         if (TerarkZipAutoConfigForOnlineDB) {
           TerarkZipTableOptions tzo;
-          TerarkZipAutoConfigForOnlineDB(tzo, opt, opt);
-          opt.table_factory.reset(NewTerarkZipTableFactory(tzo, NULL));
+          TerarkZipAutoConfigForOnlineDB(tzo, *db_opts, options_);
+          options_.table_factory.reset(NewTerarkZipTableFactory(tzo, NULL));
         }
         else {
           exec_state_ =

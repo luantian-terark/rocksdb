@@ -518,7 +518,7 @@ class LevelIterator final : public InternalIterator {
     }
 
     return table_cache_->NewIterator(
-        read_options_, env_options_, icomparator_, file_meta.fd, range_del_agg_,
+        read_options_, env_options_, icomparator_, *file_meta.file_metadata, range_del_agg_,
         nullptr /* don't need reference to table */, file_read_hist_,
         for_compaction_, nullptr /* arena */, skip_filters_, level_);
   }
@@ -3865,7 +3865,7 @@ InternalIterator* VersionSet::MakeInputIterator(
         for (size_t i = 0; i < flevel->num_files; i++) {
           list[num++] = cfd->table_cache()->NewIterator(
               read_options, env_options_compactions, cfd->internal_comparator(),
-              flevel->files[i].file_metadata, range_del_agg,
+              *flevel->files[i].file_metadata, range_del_agg,
               nullptr /* table_reader_ptr */,
               nullptr /* no per level latency histogram */,
               true /* for_compaction */, nullptr /* arena */,

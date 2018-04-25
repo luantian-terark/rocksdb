@@ -155,7 +155,7 @@ TEST_F(FlushJobTest, NonEmpty) {
   db_options_.statistics->histogramData(FLUSH_TIME, &hist);
   ASSERT_GT(hist.average, 0.0);
 
-  ASSERT_EQ(ToString(0), fd.smallest.user_key().ToString());
+  ASSERT_EQ(ToString(0), fd.smallest().user_key().ToString());
   ASSERT_EQ("9999a",
             fd.largest().user_key().ToString());  // range tombstone end key
   ASSERT_EQ(1, fd.smallest_seqno);

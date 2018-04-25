@@ -654,7 +654,8 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
           (kPartialRemovedMax - f->partial_removed) / kPartialRemovedMax;
     }
   }
-  auto path_id = GetPathId(ioptions_, estimated_total_size);
+  auto path_id = GetPathId(ioptions_, mutable_cf_options,
+                           estimated_total_size);
   auto c = new Compaction(
       vstorage, ioptions_, mutable_cf_options, inputs, output_level,
       mutable_cf_options.MaxFileSizeForLevel(output_level),
@@ -669,7 +670,7 @@ Compaction* UniversalCompactionPicker::PickCompactionConitnue(
 Compaction* UniversalCompactionPicker::TrivialMovePickCompaction(
     const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
     VersionStorageInfo* vstorage, LogBuffer* log_buffer) {
-  if (!ioptions_.compaction_options_universal.allow_trivial_move) {
+  if (!mutable_cf_options.compaction_options_universal.allow_trivial_move) {
     return nullptr;
   }
   int output_level = vstorage->num_levels() - 1;

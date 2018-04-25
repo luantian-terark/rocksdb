@@ -200,7 +200,7 @@ Status ExternalSstFileIngestionJob::Run() {
                   f.fd.GetFileSize(),
                   { f.smallest_internal_key(), f.largest_internal_key() },
                   f.assigned_seqno, f.assigned_seqno, false, 0, 0);
-
+  }
   if (consumed_seqno) {
     versions_->SetLastAllocatedSequence(last_seqno + 1);
     versions_->SetLastPublishedSequence(last_seqno + 1);
@@ -584,7 +584,7 @@ bool ExternalSstFileIngestionJob::IngestedFileFitInLevel(
 Status ExternalSstFileIngestionJob::IngestedFileOverlapWithLevel(
     SuperVersion* sv, IngestedFileInfo* file_to_ingest, int lvl,
     bool* overlap_with_level) {
-  asseet(sv->current == cfd_->current());
+  assert(sv->current == cfd_->current());
   Arena arena;
   ReadOptions ro;
   ro.total_order_seek = true;

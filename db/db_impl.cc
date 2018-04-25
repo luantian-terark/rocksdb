@@ -2196,9 +2196,7 @@ Status DBImpl::DeleteFile(std::string name) {
 
 Status DBImpl::DeleteFilesInRange(ColumnFamilyHandle* column_family,
                                   const Slice* begin, const Slice* end) {
-  RangePtr rp;
-  rp.start = begin;
-  rp.limit = end;
+  RangePtr rp(begin, end);
   return DeleteFilesInRanges(column_family, &rp, 1, true);
 }
 
@@ -2272,8 +2270,8 @@ Status DBImpl::DeleteFilesInRanges(ColumnFamilyHandle* column_family,
         }
       }
       std::sort(ranges_copy.begin(), ranges_copy.end(),
-                [uc](const Range& l, const Range& r) {
-                    return uc->Compare(l.start, r.start) < 0;
+                [uc](const Range& left, const Range& right) {
+                    return uc->Compare(left.start, right.start) < 0;
                 });
       // union ranges
       size_t c = 0;

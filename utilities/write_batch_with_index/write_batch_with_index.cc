@@ -725,7 +725,7 @@ WriteBatch* WriteBatchWithIndex::GetWriteBatch() { return &rep->write_batch; }
 size_t WriteBatchWithIndex::SubBatchCnt() { return rep->sub_batch_cnt; }
 
 WBWIIterator* WriteBatchWithIndex::NewIterator() {
-  return new WBWIIteratorImpl(0, rep->entry_index.get(), &rep->write_batch);, &rep->write_batch);
+  return new WBWIIteratorImpl(0, rep->entry_index.get(), &rep->write_batch);
 }
 
 WBWIIterator* WriteBatchWithIndex::NewIterator(
