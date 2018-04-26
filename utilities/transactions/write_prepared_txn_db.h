@@ -281,6 +281,7 @@ class WritePreparedTxnDB : public PessimisticTransactionDB {
         auto erased __attribute__((__unused__)) = erased_heap_.top();
         erased_heap_.pop();
         // No duplicate prepare sequence numbers
+        (void)erased;
         assert(erased_heap_.empty() || erased_heap_.top() != erased);
       }
       while (heap_.empty() && !erased_heap_.empty()) {

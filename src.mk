@@ -373,6 +373,7 @@ MAIN_SOURCES =                                                          \
   utilities/transactions/write_prepared_transaction_test.cc             \
   utilities/ttl/ttl_test.cc                                             \
   utilities/write_batch_with_index/write_batch_with_index_test.cc       \
+  table/terark_zip_table_reader_test.cc                                 \
 
 JNI_NATIVE_SOURCES =                                          \
   java/rocksjni/backupenginejni.cc                            \
