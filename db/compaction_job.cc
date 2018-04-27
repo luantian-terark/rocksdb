@@ -760,21 +760,26 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         assert(input_range[i - 1].largest != nullptr);
         assert(input_range[i].smallest != nullptr);
         InternalKey smallest, largest;
+        bool smallest_open, largest_open;
         if (input_range[i - 1].flags & IntervalFlag::kLargestOpen) {
           smallest.SetMinPossibleForUserKey(
               input_range[i - 1].largest->user_key());
+          smallest_open = false;
         } else {
           smallest.SetMaxPossibleForUserKey(
               input_range[i - 1].largest->user_key());
+          smallest_open = true;
         }
         if (input_range[i].flags & IntervalFlag::kSmallestOpen) {
           largest.SetMaxPossibleForUserKey(
               input_range[i].smallest->user_key());
+          largest_open = false;
         } else {
           largest.SetMinPossibleForUserKey(
               input_range[i].smallest->user_key());
+          largest_open = true;
         }
-        erase_set.push(smallest, largest);
+        erase_set.push(smallest, largest, smallest_open, largest_open);
       }
     }
     if (input_range.back().largest != nullptr) {
