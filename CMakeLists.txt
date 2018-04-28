@@ -927,6 +927,7 @@ if(WITH_TESTS)
         utilities/ttl/ttl_test.cc
         utilities/write_batch_with_index/write_batch_with_index_test.cc
         table/terark_zip_table_reader_test.cc
+        table/terark_zip_table_stress_test.cc
   )
   if(WITH_LIBRADOS)
     list(APPEND TESTS utilities/env_librados_test.cc)

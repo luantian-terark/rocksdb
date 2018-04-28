@@ -99,11 +99,11 @@ std::string get_key(size_t i)
 }
 std::string get_key(size_t i, size_t len)
 {
-    char fmt[16];
-    char buffer[32];
-    snprintf(fmt, sizeof fmt, "%%04zd%%0%zdzd", len - 4);
-    snprintf(buffer, sizeof buffer, fmt, i, i);
-    return buffer;
+  char fmt[16];
+  char buffer[32];
+  snprintf(fmt, sizeof fmt, "%%04zd%%0%zdzd", len - 4);
+  snprintf(buffer, sizeof buffer, fmt, i, i);
+  return buffer;
 }
 std::string get_value(size_t i)
 {

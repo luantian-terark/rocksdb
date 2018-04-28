@@ -547,6 +547,7 @@ TESTS = \
 	write_prepared_transaction_test \
 	terark_zip_table_db_test \
 	terark_zip_table_reader_test \
+	terark_zip_table_stress_test \
 
 PARALLEL_TEST = \
 	backupable_db_test \
@@ -1564,6 +1565,9 @@ terark_zip_table_db_test: db/terark_zip_table_db_test.o $(LIBOBJECTS) $(TESTHARN
 	$(AM_LINK)
 
 terark_zip_table_reader_test: table/terark_zip_table_reader_test.o db/db_test_util.o $(LIBOBJECTS) $(TESTHARNESS) ${LIBNAME}.so
+	$(AM_LINK)
+
+terark_zip_table_stress_test: table/terark_zip_table_stress_test.o db/db_test_util.o $(LIBOBJECTS) $(TESTHARNESS) ${LIBNAME}.so
 	$(AM_LINK)
 
 #-------------------------------------------------
