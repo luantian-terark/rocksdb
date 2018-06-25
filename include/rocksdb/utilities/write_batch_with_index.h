@@ -30,6 +30,7 @@ class DB;
 class ReadCallback;
 struct ReadOptions;
 struct DBOptions;
+class WriteBatchEntryIndexFactory;
 
 enum WriteType {
   kPutRecord,
@@ -40,6 +41,21 @@ enum WriteType {
   kLogDataRecord,
   kXIDRecord,
 };
+
+// Singleton factory instance, DON'T delete
+const WriteBatchEntryIndexFactory* WriteBatchEntrySkipListIndexFactory();
+const WriteBatchEntryIndexFactory* WriteBatchEntryRBTreeIndexFactory();
+
+extern const std::string kWriteBatchEntrySkipListFactoryName; // = "skiplist"
+extern const std::string kWriteBatchEntryRBTreeFactoryName;   // = "rbtree"
+
+// Regist third-party factory, NOT take ownership
+void RegistWriteBatchEntryIndexFactory(const char* name,
+                                       const WriteBatchEntryIndexFactory* factory);
+
+// name: skiplist/rbtree or other names registed
+// return nullptr if invalid name
+const WriteBatchEntryIndexFactory* GetWriteBatchEntryIndexFactory(const char* name);
 
 // an entry for Put, Merge, Delete, or SingleDelete entry for write batches.
 // Used in WBWIIterator.
@@ -109,10 +125,12 @@ class WriteBatchWithIndex : public WriteBatchBase {
   // overwrite_key: if true, overwrite the key in the index when inserting
   //                the same key as previously, so iterator will never
   //                show two entries with the same key.
+  // index_factory: third-party entry index support, NOT take ownership
   explicit WriteBatchWithIndex(
       const Comparator* backup_index_comparator = BytewiseComparator(),
       size_t reserved_bytes = 0, bool overwrite_key = false,
-      size_t max_bytes = 0, const char* index_type = "rbtree");
+      size_t max_bytes = 0,
+      const WriteBatchEntryIndexFactory* index_factory = nullptr);
 
   ~WriteBatchWithIndex() override;
 
