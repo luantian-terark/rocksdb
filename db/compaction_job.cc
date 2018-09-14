@@ -973,13 +973,17 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         sub_compact->compaction->CreateCompactionFilter();
     compaction_filter = compaction_filter_from_factory.get();
   }
-  MergeHelper merge(
-      env_, cfd->user_comparator(), cfd->ioptions()->merge_operator,
-      compaction_filter, db_options_.info_log.get(),
-      false /* internal key corruption is expected */,
-      existing_snapshots_.empty() ? 0 : existing_snapshots_.back(),
-      compact_->compaction->level(), db_options_.statistics.get(),
-      shutting_down_);
+	MergeHelper merge(
+		env_, cfd->user_comparator(), cfd->ioptions()->merge_operator,
+		compaction_filter, db_options_.info_log.get(),
+		false /* internal key corruption is expected */,
+		existing_snapshots_.empty() ? 0 : existing_snapshots_.back(),
+		compact_->compaction->level(), db_options_.statistics.get(),
+		shutting_down_);
+
+	if (!cfd->ioptions()->compaction_filter_factory->IsFilterIdempotent()) {
+		compaction_filter = compaction_filter_from_factory.get();
+	}
   MergeHelper merge2(
       env_, cfd->user_comparator(), cfd->ioptions()->merge_operator,
       compaction_filter, db_options_.info_log.get(),
