@@ -113,6 +113,8 @@ struct ImmutableCFOptions {
 
   bool preserve_deletes;
 
+  virtual bool IsFilterIdempotent() const { return false; }
+
   // A vector of EventListeners which call-back functions will be called
   // when specific RocksDB event happens.
   std::vector<std::shared_ptr<EventListener>> listeners;
@@ -233,6 +235,9 @@ struct MutableCFOptions {
   uint64_t max_sequential_skip_in_iterations;
   bool paranoid_file_checks;
   bool report_bg_io_stats;
+
+  virtual bool IsFilterIdempotent() const { return false; }
+
   CompressionType compression;
 
   // Derived options

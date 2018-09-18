@@ -205,8 +205,6 @@ class CompactionFilterFactory {
 
   // Returns a name that identifies this compaction filter factory.
   virtual const char* Name() const = 0;
-
-	virtual bool IsFilterIdempotent() const { return false; }
 };
 
 }  // namespace rocksdb
