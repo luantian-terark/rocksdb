@@ -16,6 +16,11 @@ LDFLAGS += $(EXTRA_LDFLAGS)
 MACHINE ?= $(shell uname -m)
 ARFLAGS = ${EXTRA_ARFLAGS} rs
 STRIPFLAGS = -S -x
+# add gluster support these will be changed to an option leater
+CFLAGS += -DUSE_GLUSTER
+CXXFLAGS += -DUSE_GLUSTER
+LDFLAGS += -lgfapi
+
 
 # Transform parallel LOG output into something more readable.
 perl_command = perl -n \
@@ -258,6 +263,7 @@ ifdef ROCKSDB_VALGRIND_RUN
 	PLATFORM_CCFLAGS += -DROCKSDB_VALGRIND_RUN
 	PLATFORM_CXXFLAGS += -DROCKSDB_VALGRIND_RUN
 endif
+
 
 ifndef DISABLE_JEMALLOC
 	ifdef JEMALLOC
