@@ -3,9 +3,9 @@
 #include <memory>
 #include <mutex>
 
+#include "env/posix_logger.h"
 #include "gluster/env_gluster.h"
 #include "monitoring/thread_status_updater.h"
-#include "posix_logger.h"
 #include "rocksdb/env.h"
 #include "util/logging.h"
 
@@ -61,7 +61,7 @@ struct {
   }
   int Erase(const std::string& filename) {
     std::lock_guard<std::mutex> l(mtx);
-    return lockedFiles.erase(filename);
+    return static_cast<int>(lockedFiles.erase(filename));
   }
 } lockedFileTable;
 
@@ -279,7 +279,6 @@ GlusterEnv::~GlusterEnv() {
   }
 }
 
-
 Status GlusterEnv::NewSequentialFile(const std::string& fname,
                                      unique_ptr<SequentialFile>* result,
                                      const EnvOptions& /**/) {
@@ -333,7 +332,16 @@ Status GlusterEnv::NewWritableFile(const std::string& fname,
 // returns non-OK.
 Status GlusterEnv::NewDirectory(const std::string& name,
                                 unique_ptr<Directory>* result) {
+  // TODO set lok or check gfapi atomic operation on new directory
   if (glfs_mkdir(fs_, name.c_str(), 0755) != 0) {
+    if (errno == EEXIST) {
+      auto fd = glfs_opendir(fs_, name.c_str());
+      if (!fd) {
+        return IOError("[gfapi] NewDirectory fail: ", name.c_str(), errno);
+      }
+      result->reset(new GfapiDir(fd));
+      return Status::OK();
+    }
     return IOError(name, errno);
   }
   result->reset(new GfapiDir{glfs_opendir(fs_, name.c_str())});
@@ -344,7 +352,9 @@ Status GlusterEnv::FileExists(const std::string& fname) {
   if (glfs_access(fs_, fname.c_str(), F_OK) == 0) {
     return Status::OK();
   }
-
+  if (errno == ENOENT) {
+    return Status::NotFound();
+  }
   return IOError(fname, errno);
 }
 
@@ -352,7 +362,7 @@ Status GlusterEnv::GetChildren(const std::string& dir,
                                std::vector<std::string>* result) {
   result->clear();
 
-  unique_ptr<GfapiDir> dir_fd{new GfapiDir(glfs_opendir(fs_, dir.c_str()))};
+  unique_ptr<GfapiDir> dir_fd(new GfapiDir(glfs_opendir(fs_, dir.c_str())));
   if (dir_fd == nullptr) {
     return IOError(dir, errno);
   }
@@ -444,7 +454,7 @@ Status GlusterEnv::GetFileModificationTime(const std::string& fname,
 Status GlusterEnv::RenameFile(const std::string& src,
                               const std::string& target) {
   if (glfs_rename(fs_, src.c_str(), target.c_str())) {
-    return IOError(src, errno);
+    return IOError("[rocksdb] reaname fail: ", src, errno);
   }
   return Status::OK();
 }
@@ -654,7 +664,7 @@ Status GfapiSequentialFile::Read(size_t len, Slice* result, char* scratch) {
       }
       return IOError("[gluster] read file fail ", filename_, errno);
     }
-    left += done;
+    left -= done;
     buf += done;
   }
   *result = Slice(scratch, len - left);
@@ -690,8 +700,8 @@ Status GfapiRandomAccessFile::Read(uint64_t offset, size_t n, Slice* result,
 size_t GfapiRandomAccessFile::GetUniqueId(char* buf, size_t size) const {
   glfs_object* fd = glfs_h_lookupat(glfs_from_glfd(fd_), nullptr,
                                     filename_.c_str(), nullptr, 0);  // no fllow
-  const auto len =
-      glfs_h_extract_handle(fd, reinterpret_cast<unsigned char*>(buf), size);
+  const auto len = glfs_h_extract_handle(
+      fd, reinterpret_cast<unsigned char*>(buf), static_cast<int>(size));
   return len > 0 ? len : 0;
 }
 
