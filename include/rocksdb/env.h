@@ -1280,4 +1280,5 @@ Status NewHdfsEnv(Env** hdfs_env, const std::string& fsname);
 // This is a factory method for TimedEnv defined in utilities/env_timed.cc.
 Env* NewTimedEnv(Env* base_env);
 
+Env* NewPosixEnv();
 }  // namespace rocksdb

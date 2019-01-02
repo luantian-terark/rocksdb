@@ -57,6 +57,7 @@
 #include "util/sync_point.h"
 #include "util/thread_local.h"
 #include "util/threadpool_imp.h"
+#include "rocksdb/utilities/object_registry.h"
 
 #if !defined(TMPFS_MAGIC)
 #define TMPFS_MAGIC 0x01021994
@@ -1117,8 +1118,23 @@ Env* Env::Default() {
   ThreadLocalPtr::InitSingletons();
   CompressionContextCache::InitSingleton();
   INIT_SYNC_POINT_SINGLETONS();
-  static PosixEnv default_env;
-  return &default_env;
+  auto InitEnv = []() -> Env* {
+    const char* envConfigStr = getenv("ROCKSDB_ENV");
+    if (envConfigStr != nullptr) {
+      std::unique_ptr<Env> envGuard;
+      if(NewCustomObject(envConfigStr, &envGuard) == nullptr){
+        printf("Cannot Init Env with ROCKSDB_ENV=%s\n", envConfigStr);
+        exit(0);
+      }
+      
+      return envGuard.release();
+    }
+    return new PosixEnv();
+  };
+  static Env* default_env = InitEnv();
+
+  return default_env;
 }
 
+Env* NewPosixEnv() { return new PosixEnv(); }
 }  // namespace rocksdb
